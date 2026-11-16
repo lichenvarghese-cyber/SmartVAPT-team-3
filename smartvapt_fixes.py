@@ -57,7 +57,10 @@ def _ubuntu_release_from_suffix(hmu: str | None, base: str, up: str = "") -> str
         return hmu
     if "." in base:
         return base
-    return _UPSTREAM_TO_RELEASE.get(".".join(up.split(".")[:2]), "")
+    # Normalise an upstream like "8.9p1" to its "8.9" lookup key.
+    up_key = ".".join((re.match(r"\d+", part).group(0) if re.match(r"\d+", part) else part)
+                       for part in up.split(".")[:2])
+    return _UPSTREAM_TO_RELEASE.get(up_key, "")
 
 
 def parse_openssh_banner(banner: str) -> dict[str, object] | None:

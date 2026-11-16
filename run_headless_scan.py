@@ -15,6 +15,7 @@ from nuclei_scanner import NucleiScanner
 from report_gen import generate_report
 from scoring import enrich_findings
 from subdomain_scanner import SubdomainScanner
+from verification import apply_verification
 from web_scanner import DNSScanner, WebScanner
 
 
@@ -218,7 +219,7 @@ def main():
     enriched = enrich_findings(findings.to_dict_list())
     results["findings"] = enriched
 
-    print("[*] AI analysis (graceful without GEMINI_API_KEY)...")
+    print("[*] AI analysis (local SLM; falls back if unavailable)...")
     try:
         ai_result = AIEngine().analyze(enriched, results)
     except Exception as e:
@@ -226,6 +227,12 @@ def main():
                      "overall_risk": "Unknown", "risk_score": 0,
                      "top_findings": [], "technical_remediation": [],
                      "conclusion": ""}
+    try:
+        ai_result = apply_verification(enriched, ai_result, scan_id=scan_id)
+        results["verification"] = ai_result.get("verification")
+    except Exception as e:
+        results["verification"] = {"verified": False, "status": "error",
+                                   "error": str(e), "scan_id": scan_id}
 
     pdf_path = f"SmartVAPT_{scan_id}.pdf"
     print("[*] Generating PDF report...")

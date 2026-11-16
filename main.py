@@ -17,6 +17,7 @@ from nuclei_scanner import NucleiScanner
 from report_gen import generate_report
 from scoring import enrich_findings
 from subdomain_scanner import SubdomainScanner
+from verification import apply_verification
 from web_scanner import DNSScanner, WebScanner, parse_auth_headers
 
 st.set_page_config(page_title="SmartVAPT", page_icon="SHIELD", layout="wide")
@@ -74,6 +75,21 @@ with st.sidebar:
                                   disabled=not baseline_mode,
                                   help="One file per target/environment; "
                                        "used for the NEW/FIXED/UNCHANGED diff")
+    # --- New: finding filters ---
+    with st.expander("Filter findings"):
+        filter_severity = st.multiselect("Severity", ["critical", "high", "medium", "low", "info"],
+                                         default=["critical", "high", "medium"],
+                                         help="Show only these severities in the report and findings list")
+        filter_vector = st.multiselect("Vector", ["network", "web", "dns", "api", "recon"],
+                                       default=["network", "web", "dns"],
+                                       help="Show only these attack vectors")
+    # --- New: report section toggles ---
+    with st.expander("Report sections"):
+        include_exec_summary = st.checkbox("Executive summary", value=True)
+        include_top_findings = st.checkbox("Top findings", value=True)
+        include_pentest_details = st.checkbox("Pen-test details & exploitation options", value=True)
+        include_tech_remediation = st.checkbox("Technical remediation", value=True)
+        include_appendix = st.checkbox("Appendix (scan details)", value=True)
     with st.expander("Authenticated scan (optional)"):
         auth_headers_raw = st.text_area(
             "HTTP headers sent with every web/API/Nuclei request",
@@ -82,6 +98,29 @@ with st.sidebar:
             help="One 'Name: value' per line. Lets you scan behind login "
                  "(session cookies, bearer tokens). Also forwarded to "
                  "gobuster (-c/-H) and nuclei (-H). Do not commit secrets.")
+    # --- New: Remediation tracker ---
+    with st.expander("Remediation tracker"):
+        st.caption("Track which findings have been fixed across scans.")
+        # Initialize session state for the tracker if not present
+        if "remediation_tracker" not in st.session_state:
+            st.session_state.remediation_tracker = {}  # {finding_id: "fixed"/"pending"}
+        # After a scan, show the current findings and let the user mark them
+        current_ids = [str(f.get("id")) for f in (results.get("findings") or [])]
+        for fid in current_ids:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.text(fid)
+            with col2:
+                status = st.selectbox(
+                    "Status", ["pending", "fixed"], index=0,
+                    key=f"track_{fid}",
+                    help="Mark this finding as fixed or still pending")
+            st.session_state.remediation_tracker[fid] = status
+        # Show tracker summary
+        if st.session_state.remediation_tracker:
+            fixed = sum(1 for s in st.session_state.remediation_tracker.values() if s == "fixed")
+            pending = sum(1 for s in st.session_state.remediation_tracker.values() if s == "pending")
+            st.caption(f"Fixed: {fixed} · Pending: {pending}")
     run = st.button("Run SmartVAPT Scan", use_container_width=True)
     live_output = st.sidebar.toggle("Live scan output", value=True,
                                     help="Stream nmap/gobuster progress in real time")
@@ -534,6 +573,31 @@ if run:
             "technical_remediation": [],
             "conclusion": "",
         }
+    # Ground every structured AI claim in this scan's findings and attach a
+    # SHA-256 provenance record. Ungrounded claims are dropped.
+    try:
+        ai_result = apply_verification(enriched, ai_result, scan_id=scan_id)
+        results["verification"] = ai_result.get("verification")
+    except Exception as e:
+        results["verification"] = {"verified": False, "status": "error",
+                                   "error": str(e), "scan_id": scan_id}
+
+    # --- New: apply UI finding filters ---
+    # filter_severity and filter_vector come from the sidebar expander;
+    # if present, narrow the enriched findings list before it is exposed.
+    try:
+        fs = set(filter_severity) if 'filter_severity' in globals() else None
+        fv = set(filter_vector) if 'filter_vector' in globals() else None
+    except NameError:
+        fs, fv = None, None
+    if fs is not None or fv is not None:
+        filt = enriched
+        if fs:
+            filt = [f for f in filt if str(f.get("severity") or "").lower() in fs]
+        if fv:
+            filt = [f for f in filt if str(f.get("vector") or "").lower() in fv]
+        enriched = filt
+    results["findings"] = enriched
 
     # Merge playbook data into the unified findings list exposed to the UI
     # and every exporter/appendix.
@@ -568,7 +632,12 @@ if run:
     set_progress(95)
     pdf_path = f"SmartVAPT_{scan_id}.pdf"
     try:
-        generate_report(results, ai_result, pdf_path)
+        generate_report(results, ai_result, pdf_path,
+                        include_exec_summary=include_exec_summary,
+                        include_top_findings=include_top_findings,
+                        include_pentest_details=include_pentest_details,
+                        include_tech_remediation=include_tech_remediation,
+                        include_appendix=include_appendix)
     except Exception as e:
         pdf_path = None
         st.warning(f"PDF generation failed: {e}")
@@ -621,6 +690,16 @@ if run:
 
     st.subheader("Executive Summary")
     st.write(ai_result.get("executive_summary", "N/A"))
+    verification = ai_result.get("verification") or {}
+    if verification:
+        ok = verification.get("verified")
+        st.caption(
+            f"{'✅' if ok else '⚠️'} AI data verification: "
+            f"{verification.get('status', 'unknown').upper()} — "
+            f"{verification.get('grounded_claims', 0)}/{verification.get('structured_claims', 0)} "
+            f"structured claims matched this scan · "
+            f"findings digest `{verification.get('data_sha256', 'N/A')[:12]}…`"
+        )
 
     # ----------------------------------------------------------------
     # TABS

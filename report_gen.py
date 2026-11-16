@@ -112,7 +112,12 @@ def _safe_multi(pdf, text, line_h=5, size=10, font="DejaVu", style=""):
 
 
 def generate_report(scan_data: dict, ai_result: dict,
-                    output_path: str = "SmartVAPT_Report.pdf"):
+                    output_path: str = "SmartVAPT_Report.pdf",
+                    include_exec_summary: bool = True,
+                    include_top_findings: bool = True,
+                    include_pentest_details: bool = True,
+                    include_tech_remediation: bool = True,
+                    include_appendix: bool = True):
     pdf = PDFReport()
     _register_fonts(pdf)
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -129,18 +134,28 @@ def generate_report(scan_data: dict, ai_result: dict,
     pdf.cell(0, 8, f"Target: {scan_data.get('target', 'N/A')}", ln=True, align="C")
     pdf.set_x(pdf.l_margin)
     pdf.cell(0, 8, f"Date: {datetime.now(timezone.utc).astimezone():%B %d, %Y}", ln=True, align="C")
+    verification = ai_result.get("verification") or {}
+    if verification:
+        stamp = (f"Scan ID: {verification.get('scan_id') or scan_data.get('scan_id', 'N/A')}   "
+                 f"Data SHA-256: {verification.get('data_sha256', 'N/A')[:16]}...   "
+                 f"Verification: {verification.get('status', 'unknown').upper()}")
+        pdf.set_font("DejaVu", "I", 8)
+        pdf.set_text_color(90, 90, 90)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 6, stamp, ln=True, align="C")
     pdf.ln(8)
 
     # ---------- 1. Executive Summary ----------
-    pdf.set_font("DejaVu", "B", 14)
-    pdf.set_text_color(0, 60, 120)
-    pdf.set_x(pdf.l_margin)
-    pdf.cell(0, 10, "1. Executive Summary", ln=True)
-    pdf.ln(1)
-    pdf.set_text_color(30, 30, 30)
-    _safe_multi(pdf, ai_result.get("executive_summary", "No summary available."),
-                line_h=6, size=11)
-    pdf.ln(4)
+    if include_exec_summary:
+        pdf.set_font("DejaVu", "B", 14)
+        pdf.set_text_color(0, 60, 120)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 10, "1. Executive Summary", ln=True)
+        pdf.ln(1)
+        pdf.set_text_color(30, 30, 30)
+        _safe_multi(pdf, ai_result.get("executive_summary", "No summary available."),
+                    line_h=6, size=11)
+        pdf.ln(4)
 
     risk = ai_result.get("overall_risk", "Unknown")
     score = ai_result.get("risk_score", 0)
@@ -153,71 +168,75 @@ def generate_report(scan_data: dict, ai_result: dict,
     pdf.ln(4)
 
     # ---------- 2. Top Findings ----------
-    pdf.set_font("DejaVu", "B", 14)
-    pdf.set_text_color(0, 60, 120)
-    pdf.set_x(pdf.l_margin)
-    pdf.cell(0, 10, "2. Top Findings", ln=True)
-
-    top_findings = ai_result.get("top_findings", []) or []
-    if not top_findings:
-        _safe_multi(pdf, "No findings reported.", line_h=5, size=10)
-    for i, f in enumerate(top_findings, 1):
-        pdf.set_font("DejaVu", "B", 11)
-        pdf.set_text_color(*SEVERITY_COLORS.get(str(f.get("severity", "")).lower(),
-                                                (0, 0, 0)))
+    if include_top_findings:
+        pdf.set_font("DejaVu", "B", 14)
+        pdf.set_text_color(0, 60, 120)
         pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 6, _clean_text(f"{i}. {f.get('title', 'Finding')}  "
-                                         f"[{f.get('severity', 'N/A')}]"))
-        pdf.set_text_color(30, 30, 30)
-        _safe_multi(pdf, f"Business Impact: {f.get('business_impact', 'N/A')}",
-                    line_h=5, size=10)
-        _safe_multi(pdf, f"Remediation: {f.get('remediation', 'N/A')}",
-                    line_h=5, size=10)
-        pdf.ln(2)
+        pdf.cell(0, 10, "2. Top Findings", ln=True)
+
+        top_findings = ai_result.get("top_findings", []) or []
+        if not top_findings:
+            _safe_multi(pdf, "No findings reported.", line_h=5, size=10)
+        for i, f in enumerate(top_findings, 1):
+            pdf.set_font("DejaVu", "B", 11)
+            pdf.set_text_color(*SEVERITY_COLORS.get(str(f.get("severity", "")).lower(),
+                                                    (0, 0, 0)))
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 6, _clean_text(f"{i}. {f.get('title', 'Finding')}  "
+                                             f"[{f.get('severity', 'N/A')}]"))
+            pdf.set_text_color(30, 30, 30)
+            _safe_multi(pdf, f"Business Impact: {f.get('business_impact', 'N/A')}",
+                        line_h=5, size=10)
+            _safe_multi(pdf, f"Remediation: {f.get('remediation', 'N/A')}",
+                        line_h=5, size=10)
+            pdf.ln(2)
 
     # ---------- 3. Pen-Test Details & Exploitation Options ----------
-    pdf.add_page()
-    pdf.set_font("DejaVu", "B", 14)
-    pdf.set_text_color(0, 60, 120)
-    pdf.set_x(pdf.l_margin)
-    pdf.cell(0, 10, "3. Penetration-Test Details & Exploitation Options", ln=True)
+    if include_pentest_details:
+        pdf.add_page()
+        pdf.set_font("DejaVu", "B", 14)
+        pdf.set_text_color(0, 60, 120)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 10, "3. Penetration-Test Details & Exploitation Options", ln=True)
 
-    _render_pentest_details(pdf, scan_data)
+        _render_pentest_details(pdf, scan_data)
 
     # ---------- 4. Technical Remediation ----------
-    pdf.add_page()
-    pdf.set_font("DejaVu", "B", 14)
-    pdf.set_text_color(0, 60, 120)
-    pdf.set_x(pdf.l_margin)
-    pdf.cell(0, 10, "4. Technical Remediation", ln=True)
-
-    remediation = ai_result.get("technical_remediation", []) or []
-    if not remediation:
-        _safe_multi(pdf, "No technical remediation steps provided.",
-                    line_h=5, size=10)
-    for i, t in enumerate(remediation, 1):
-        pdf.set_font("DejaVu", "B", 11)
-        pdf.set_text_color(30, 30, 30)
+    if include_tech_remediation:
+        pdf.add_page()
+        pdf.set_font("DejaVu", "B", 14)
+        pdf.set_text_color(0, 60, 120)
         pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 6, _clean_text(f"{i}. {t.get('finding', 'Finding')}  "
-                                         f"({t.get('owasp', 'N/A')})"))
-        for step in t.get("steps", []):
-            _safe_multi(pdf, f"  - {step}", line_h=5, size=10)
-        if t.get("commands"):
-            pdf.set_fill_color(240, 240, 240)
-            for cmd in t["commands"]:
-                _safe_multi(pdf, f"    $ {cmd}", line_h=5, size=9,
-                            font="DejaVuMono")
-        pdf.ln(3)
+        pdf.cell(0, 10, "4. Technical Remediation", ln=True)
+
+        remediation = ai_result.get("technical_remediation", []) or []
+        if not remediation:
+            _safe_multi(pdf, "No technical remediation steps provided.",
+                        line_h=5, size=10)
+        for i, t in enumerate(remediation, 1):
+            pdf.set_font("DejaVu", "B", 11)
+            pdf.set_text_color(30, 30, 30)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 6, _clean_text(f"{i}. {t.get('finding', 'Finding')}  "
+                                             f"({t.get('owasp', 'N/A')})"))
+            for step in t.get("steps", []):
+                _safe_multi(pdf, f"  - {step}", line_h=5, size=10)
+            if t.get("commands"):
+                pdf.set_fill_color(240, 240, 240)
+                for cmd in t["commands"]:
+                    _safe_multi(pdf, f"    $ {cmd}", line_h=5, size=9,
+                                font="DejaVuMono")
+            pdf.ln(3)
 
     # ---------- 5. Appendix ----------
-    pdf.add_page()
-    pdf.set_font("DejaVu", "B", 14)
-    pdf.set_text_color(0, 60, 120)
-    pdf.set_x(pdf.l_margin)
-    pdf.cell(0, 10, "5. Appendix: Scan Details", ln=True)
-    pdf.ln(2)
-    _render_appendix(pdf, scan_data)
+    if include_appendix:
+        pdf.add_page()
+        pdf.set_font("DejaVu", "B", 14)
+        pdf.set_text_color(0, 60, 120)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 10, "5. Appendix: Scan Details", ln=True)
+        pdf.ln(2)
+        _render_appendix(pdf, scan_data)
 
     pdf.output(output_path)
     return output_path
@@ -611,3 +630,40 @@ def _render_appendix(pdf, scan_data: dict):
                 pdf.multi_cell(0, 4,
                                _clean_text(f"    Remediation: {'; '.join(steps)[:240]}"))
             pdf.ln(1)
+
+    # ---------- Data verification / provenance ----------
+    verification = ai_result.get("verification") or {}
+    if verification:
+        h2("J. Data Verification & Provenance")
+        status = str(verification.get("status", "unknown")).upper()
+        verdict = "VERIFIED — all structured AI claims match this scan" if \
+            verification.get("verified") else \
+            "NOT VERIFIED — see unmatched claims below"
+        kv("Scan ID", verification.get("scan_id") or scan_data.get("scan_id", "N/A"))
+        kv("Findings in scan", verification.get("finding_count"))
+        kv("Findings digest (SHA-256)", verification.get("data_sha256", "N/A"))
+        kv("Structured AI claims", verification.get("structured_claims"))
+        kv("Grounded claims", verification.get("grounded_claims"))
+        kv("Unmatched claims (dropped)", verification.get("unmatched_claims"))
+        kv("Verification status", verdict)
+        kv("Verified at", verification.get("verified_at", "N/A"))
+        contradictions = verification.get("summary_contradictions") or []
+        if contradictions:
+            body("Executive-summary numeric contradictions (corrected/flagged):")
+            for c in contradictions:
+                body(f"  - AI said '{c.get('claim')}' but scan count is "
+                     f"{c.get('actual')} {c.get('severity')}")
+        else:
+            body("Executive-summary numeric claims were consistent with the "
+                 "scan's finding counts.")
+        unmatched = [c for c in (verification.get("top_findings", [])
+                                 + verification.get("technical_remediation", []))
+                     if not c.get("grounded")]
+        if unmatched:
+            body("Ungrounded AI claims removed from the report:")
+            for c in unmatched:
+                item = c.get("input") or {}
+                body(f"  - {item.get('title') or item.get('finding') or 'unnamed'}: "
+                     f"{c.get('reason')}")
+        body(verification.get("note", ""))
+

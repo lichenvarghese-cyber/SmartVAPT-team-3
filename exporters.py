@@ -25,10 +25,11 @@ def export_json(results: dict[str, Any], ai_result: dict[str, Any],
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target": results.get("target"),
         "scan_id": results.get("scan_id"),
+        "verification": results.get("verification"),
         "summary": ai_result_summary(ai_result),
         "findings": results.get("findings", []),
         "raw": {k: v for k, v in results.items()
-                if k not in ("findings",)},
+                if k not in ("findings", "verification")},
     }
     with open(path, "w") as f:
         json.dump(payload, f, indent=2, default=str)
@@ -40,6 +41,7 @@ def ai_result_summary(ai_result: dict[str, Any]) -> dict[str, Any]:
         "overall_risk": ai_result.get("overall_risk"),
         "risk_score": ai_result.get("risk_score"),
         "executive_summary": ai_result.get("executive_summary"),
+        "verification": ai_result.get("verification"),
     }
 
 

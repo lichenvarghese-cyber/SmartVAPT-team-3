@@ -1,8 +1,20 @@
+"""Privacy-preserving AI report generation using a local small language model.
+
+By default SmartVAPT talks to a locally-running SLM (Ollama / an
+OpenAI-compatible endpoint) so that scan findings never leave the machine.
+No API key is required and no data is sent to a third-party service.
+
+Supported providers:
+  - "ollama":   Ollama (http://localhost:11434)  -- default
+  - "openai":   any OpenAI-compatible chat endpoint (LM Studio, vLLM, ...)
+"""
 import json
+import os
+from typing import Any
 
-from google import genai
+import requests
 
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import SLM_BASE_URL, SLM_MODEL, SLM_PROVIDER, SLM_TIMEOUT
 
 SYSTEM_PROMPT = """You are a Senior Penetration Tester and CISO advisor.
 You will receive raw vulnerability data from an automated VAPT scan covering:
@@ -23,67 +35,109 @@ Return ONLY valid JSON in this schema:
   "overall_risk": "Critical|High|Medium|Low",
   "risk_score": 0-10,
   "top_findings": [
-    {"title": "...", "severity": "...", "business_impact": "...", "remediation": "..."}
+    {"finding_id": "exact id from the findings list", "title": "...", "severity": "...", "business_impact": "...", "remediation": "..."}
   ],
   "technical_remediation": [
-    {"finding": "...", "owasp": "...", "steps": ["...", "..."], "commands": ["..."]}
+    {"finding_id": "exact id from the findings list", "finding": "...", "owasp": "...", "steps": ["...", "..."], "commands": ["..."]}
   ],
   "conclusion": "..."
 }
+Every finding_id MUST be copied verbatim from the supplied findings list.
+Do not invent findings, CVEs, ports, or targets that are not in the findings list.
 """
 
 
 class AIEngine:
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or GEMINI_API_KEY
-        if not self.api_key or self.api_key == "YOUR_GEMINI_API_KEY_HERE":
-            raise ValueError("GEMINI_API_KEY not configured. Set env var or edit config.py")
-        self.client = genai.Client(api_key=self.api_key)
+    def __init__(self, provider: str | None = None, model: str | None = None,
+                 base_url: str | None = None, timeout: int | None = None,
+                 api_key: str | None = None):
+        # ``api_key`` is accepted for backward compatibility but ignored: the
+        # local SLM does not use remote credentials.
+        self.provider = (provider or SLM_PROVIDER or "ollama").lower()
+        self.model = model or SLM_MODEL
+        self.base_url = (base_url or SLM_BASE_URL).rstrip("/")
+        self.timeout = timeout or SLM_TIMEOUT
 
+    # ------------------------------------------------------------------ call
+    def _call_ollama(self, prompt: str) -> str:
+        url = f"{self.base_url}/api/generate"
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "system": SYSTEM_PROMPT,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.2},
+        }
+        r = requests.post(url, json=payload, timeout=self.timeout)
+        r.raise_for_status()
+        data = r.json()
+        return (data.get("response") or "").strip()
+
+    def _call_openai(self, prompt: str) -> str:
+        url = f"{self.base_url}/v1/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+        }
+        r = requests.post(url, json=payload, timeout=self.timeout)
+        r.raise_for_status()
+        data = r.json()
+        return (data["choices"][0]["message"]["content"] or "").strip()
+
+    def _call(self, prompt: str) -> str:
+        if self.provider == "openai":
+            return self._call_openai(prompt)
+        return self._call_ollama(prompt)
+
+    # ---------------------------------------------------------------- analyze
     def analyze(self, findings: list, scan_summary: dict) -> dict:
         prompt = self._build_prompt(findings, scan_summary)
         try:
-            response = self.client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config={"system_instruction": SYSTEM_PROMPT},
-            )
-            text = response.text.strip()
+            text = self._call(prompt)
             if text.startswith("```"):
-                text = text.split("```")[1]
-                text = text.removeprefix("json")
+                text = text.split("```", 2)[1]
+                text = text.removeprefix("json").strip()
             return json.loads(text)
         except json.JSONDecodeError:
+            # The model answered but not with clean JSON; keep its text.
             return {
-                "executive_summary": response.text,
+                "executive_summary": text if "text" in locals() else "",
                 "overall_risk": "Unknown",
                 "risk_score": 0,
                 "top_findings": [],
                 "technical_remediation": [],
-                "conclusion": "AI returned non-JSON response.",
+                "conclusion": "Local SLM returned a non-JSON response.",
             }
         except Exception as e:
             fallback = self._fallback_summary(findings)
             fallback["conclusion"] = (
-                f"Note: AI analysis unavailable ({type(e).__name__}). "
+                f"Note: local SLM analysis unavailable ({type(e).__name__}: {e}). "
                 "This report was generated using deterministic severity mapping. "
-                "Check API key validity and re-run for the full AI narrative."
+                "Ensure the SLM is running (e.g. 'ollama serve' with model "
+                f"'{self.model}') and re-run for the full AI narrative."
             )
             return fallback
 
     def _build_prompt(self, findings: list, scan_summary: dict) -> str:
-        return f"""Analyze the following VAPT scan results and produce a JSON report
-as specified in your system instructions.
+        # Keep the prompt compact so it fits small-model context windows.
+        trimmed = findings[:25]
+        return (
+            "Analyze the following VAPT scan results and produce a JSON report "
+            "as specified in your system instructions.\n\n"
+            f"=== UNIFIED FINDINGS ({len(findings)} total, showing {len(trimmed)}) ===\n"
+            f"{json.dumps(trimmed, indent=2, default=str)[:8000]}\n\n"
+            f"=== SCAN SUMMARY ===\n"
+            f"{json.dumps(scan_summary, indent=2, default=str)[:1500]}\n\n"
+            "Return ONLY JSON. No markdown. No explanations outside JSON."
+        )
 
-=== UNIFIED FINDINGS ({len(findings)} total) ===
-{json.dumps(findings, indent=2, default=str)[:10000]}
-
-=== SCAN SUMMARY ===
-{json.dumps(scan_summary, indent=2, default=str)[:2000]}
-
-Return ONLY JSON. No markdown. No explanations outside JSON.
-"""
-
+    # ---------------------------------------------------------------- fallback
     @staticmethod
     def _fallback_summary(findings: list) -> dict:
         """Generate a real executive summary from findings without the AI."""
