@@ -13,4 +13,5 @@ SmartVAPT_*.sarif
 SmartVAPT_*.json
 results_*.json
 baseline.json
+eta_history.json
 evidence/*/

@@ -5,6 +5,7 @@ import secrets
 import socket
 import ssl
 import subprocess
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -75,6 +76,23 @@ BINARY_SIGNATURES = {
     ".tar.gz": [b"\x1f\x8b"],
     ".gz":     [b"\x1f\x8b"],
 }
+
+
+def _parse_delay_seconds(value: str) -> float:
+    """Parse gobuster-style durations ('250ms', '1s', '0.5') into seconds."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return 0.0
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(ms|s|m)?", text)
+    if not match:
+        return 0.0
+    amount = float(match.group(1))
+    unit = match.group(2) or "s"
+    if unit == "ms":
+        return amount / 1000.0
+    if unit == "m":
+        return amount * 60.0
+    return amount
 
 
 def _extension_key(path: str) -> str | None:
@@ -266,10 +284,17 @@ class WebScanner:
 
     def gobuster_scan(self, wordlist: str = "/usr/share/wordlists/dirb/common.txt",
                       progress_cb=None, stop_flag=None,
-                      http_services: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                      http_services: list[dict[str, Any]] | None = None,
+                      threads: int = 20, delay: str = "",
+                      passive: bool = False) -> dict[str, Any]:
         if http_services:
             self.set_target(http_services[0].get("url") or self.target)
         result = {"target": self.target, "found": [], "findings": [], "error": None}
+        if passive:
+            result["skipped"] = "provider_guardrail"
+            result["error"] = ("Directory brute-forcing disabled by provider "
+                               "guardrails (CDN/WAF passive mode).")
+            return result
         if not http_services:
             result["error"] = ("No HTTP service detected by nmap -sV for this "
                                "target; directory brute-forcing skipped.")
@@ -277,8 +302,14 @@ class WebScanner:
         if not os.path.exists(wordlist):
             result["error"] = f"Wordlist not found: {wordlist}"
             return result
+        try:
+            threads = max(1, min(int(threads), 20))
+        except (TypeError, ValueError):
+            threads = 20
         cmd = ["gobuster", "dir", "-u", self.target, "-w", wordlist,
-               "-q", "--no-error", "-t", "20"]
+               "-q", "--no-error", "-t", str(threads)]
+        if delay:
+            cmd += ["--delay", str(delay)]
         cookie = ""
         for k, v in self.auth_headers.items():
             if k.lower() == "cookie":
@@ -307,7 +338,8 @@ class WebScanner:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
                 raw = proc.stdout
         except FileNotFoundError:
-            raw = self._python_dir_fuzz(wordlist, progress_cb, stop_flag)
+            raw = self._python_dir_fuzz(wordlist, progress_cb, stop_flag,
+                                        max_workers=threads, delay=delay)
             if raw is None:
                 result["error"] = "Stopped by user"
         except subprocess.TimeoutExpired as e:
@@ -336,7 +368,8 @@ class WebScanner:
                     ))
         return result
 
-    def _python_dir_fuzz(self, wordlist: str, progress_cb=None, stop_flag=None):
+    def _python_dir_fuzz(self, wordlist: str, progress_cb=None, stop_flag=None,
+                         max_workers: int = 10, delay: str = ""):
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
         try:
@@ -347,8 +380,11 @@ class WebScanner:
         words = words[:4600]
         found_lines: list[str] = []
         lock = threading.Lock()
+        pause = _parse_delay_seconds(delay)
 
         def probe(word: str):
+            if pause:
+                time.sleep(pause)
             url = f"{self.target}/{word}"
             try:
                 resp = requests.get(url, timeout=self.timeout, allow_redirects=False,
@@ -362,7 +398,7 @@ class WebScanner:
                 return f"/{word}  (Status: {status}) [Size: {size}]"
             return None
 
-        with ThreadPoolExecutor(max_workers=10) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as pool:
             futures = {pool.submit(probe, w): w for w in words}
             for fut in as_completed(futures):
                 if stop_flag and stop_flag.get("stop"):
@@ -520,13 +556,15 @@ class WebScanner:
             cached = self.detect_soft404_baseline()
         return cached
 
-    def probe_sensitive_paths(self) -> dict[str, Any]:
+    def probe_sensitive_paths(self, request_delay: float = 0.0) -> dict[str, Any]:
         HEAD_BYTES = 400
         result = {"found": [], "findings": [], "discarded": [], "soft404_baseline": None}
         baseline = self.detect_soft404_baseline()
         result["soft404_baseline"] = {k: baseline[k] for k in ("detected", "probed", "returned_200",
                                                               "body_size", "body_sha256", "title", "note")}
         for path in SENSITIVE_PATHS:
+            if request_delay:
+                time.sleep(max(0.0, float(request_delay)))
             url = f"{self.target}/{path}"
             try:
                 r = requests.get(url, timeout=self.timeout, allow_redirects=False,

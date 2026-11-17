@@ -426,4 +426,12 @@ def enrich_findings(findings: list[dict]) -> list[dict]:
         f["exploitation"] = exploit_guide_for(f.get("title", ""),
                                               f.get("description", ""),
                                               finding=f)
+        # Deterministic OWASP Top 10 / NIST CSF / PCI-DSS mapping. Kept in a
+        # separate module so the framework references can be audited and
+        # tested independently of the AI narrative.
+        try:
+            from compliance_mapper import enrich as _enrich_compliance
+            _enrich_compliance(f)
+        except Exception:
+            pass
     return findings

@@ -7,9 +7,12 @@ import sys
 
 from ai_engine import AIEngine
 from api_scanner import APIScanner
+from compliance_mapper import summarize as summarize_compliance
 from evidence import EvidenceStore, new_scan_id
 from findings import Finding, FindingSet
 from geo_locator import GeoLocator
+from infrastructure_mapper import (InfrastructureMapper, apply_override,
+                                   default_guardrails)
 from network_scanner import NetworkScanner
 from nuclei_scanner import NucleiScanner
 from report_gen import generate_report
@@ -51,6 +54,7 @@ def main():
     scan_dns = "no-dns" not in opts
     scan_sub = "subdomains" in opts
     scan_api = "api" in opts
+    force_active = "force-active" in opts
 
     def log(line):
         print(line.rstrip())
@@ -67,6 +71,8 @@ def main():
                   .split("/")[0].split(":")[0])
     domain = net_target
 
+    guardrails = default_guardrails(10)
+    infrastructure: dict = {}
     if "no-geo" not in opts:
         print("[*] IP Geolocation & Hosting Lookup...")
         try:
@@ -75,8 +81,35 @@ def main():
         except Exception as e:
             results["geo"] = {"error": str(e)}
             print(f"[!] geolocation error: {e}")
+        print("[*] Provider classification & guardrails...")
+        try:
+            infrastructure = InfrastructureMapper(
+                target, evidence=evidence).analyze(
+                    results["geo"], requested_nuclei_rate=10)
+            if force_active:
+                infrastructure = apply_override(infrastructure,
+                                                requested_nuclei_rate=10)
+            results["infrastructure"] = infrastructure
+            guardrails = infrastructure.get("guardrails") or guardrails
+            print(f"    -> {infrastructure.get('provider_label')} | "
+                  f"mode: {infrastructure.get('recommended_mode')}")
+            for warning in infrastructure.get("warnings") or []:
+                print(f"    [!] {warning}")
+        except Exception as e:
+            results["infrastructure"] = {"error": str(e)}
+            print(f"[!] provider classification error: {e}")
+    else:
+        results["geo"] = {}
+        results["infrastructure"] = {}
+    results["guardrails"] = guardrails
 
-    if scan_network:
+    if scan_network and not guardrails.get("allow_network", True):
+        results["network"] = {
+            "skipped": "provider_guardrail",
+            "reason": "Network/OS scanning disabled by provider guardrails.",
+        }
+        print("[i] network scan skipped by provider guardrails")
+    elif scan_network:
         print("[*] Network scan (nmap + vulners)...")
         try:
             ns = NetworkScanner(net_target, evidence=evidence)
@@ -111,10 +144,23 @@ def main():
             web_result = {
                 "headers": ws.check_headers(),
                 "technologies": ws.detect_technologies(),
-                "directories": ws.gobuster_scan(progress_cb=log, http_services=http_services),
+                "directories": (ws.gobuster_scan(
+                    progress_cb=log, http_services=http_services,
+                    threads=guardrails.get("gobuster_threads", 20),
+                    delay=guardrails.get("gobuster_delay", ""),
+                    passive=not guardrails.get("allow_directory_bruteforce", True))
+                    if guardrails.get("allow_directory_bruteforce", True)
+                    else {"target": ws.target, "found": [], "findings": [],
+                          "skipped": "provider_guardrail",
+                          "error": "Directory brute-forcing disabled by provider guardrails."}),
                 "tls": ws.analyze_tls(),
                 "robots_sitemap": ws.fetch_robots_sitemap(),
-                "sensitive_paths": ws.probe_sensitive_paths(),
+                "sensitive_paths": (ws.probe_sensitive_paths(
+                    request_delay=guardrails.get("request_delay", 0.0))
+                    if guardrails.get("allow_sensitive_paths", True)
+                    else {"found": [], "findings": [], "discarded": [],
+                          "skipped": "provider_guardrail",
+                          "error": "Sensitive-path probing disabled by provider guardrails."}),
                 "redirects": ws.analyze_redirects(),
             }
             results["web"] = web_result
@@ -136,12 +182,21 @@ def main():
             results["dns"] = {"error": str(e)}
             print(f"[!] dns error: {e}")
 
-    if scan_nuclei:
+    if scan_nuclei and not guardrails.get("allow_nuclei", True):
+        results["nuclei"] = {
+            "skipped": "provider_guardrail", "available": False,
+            "matched": [], "findings": [],
+            "error": "Nuclei disabled by provider guardrails (passive mode).",
+        }
+        print("[i] nuclei skipped by provider guardrails")
+    elif scan_nuclei:
         print("[*] Nuclei template scan...")
         try:
             nuc_target = (((results.get("web") or {}).get("directories") or {}).get("target")) \
                 or (results.get("network") or {}).get("primary_http_url") or target
-            nsc = NucleiScanner(nuc_target, evidence=evidence, rate_limit=10)
+            effective_rl = min(10, int(guardrails.get("nuclei_rate_limit", 10)))
+            nsc = NucleiScanner(nuc_target, evidence=evidence,
+                                rate_limit=effective_rl)
             nuc_result = nsc.scan(progress_cb=log)
             results["nuclei"] = nuc_result
             add_all(findings, nuc_result.get("findings"))
@@ -160,7 +215,13 @@ def main():
         except Exception as e:
             results["subdomains"] = {"error": str(e)}
 
-    if scan_api:
+    if scan_api and not guardrails.get("allow_api", True):
+        results["api"] = {
+            "skipped": "provider_guardrail", "endpoints": [], "findings": [],
+            "errors": ["API checks disabled by provider guardrails (passive mode)."],
+        }
+        print("[i] API checks skipped by provider guardrails")
+    elif scan_api:
         print("[*] API security checks...")
         try:
             asc = APIScanner(target, evidence=evidence)
@@ -222,6 +283,10 @@ def main():
     print("[*] Scoring / enrichment...")
     enriched = enrich_findings(findings.to_dict_list())
     results["findings"] = enriched
+    results["compliance"] = summarize_compliance(enriched)
+    print(f"    -> compliance exposure: "
+          f"{results['compliance'].get('exposure_index', 0)}/100 "
+          f"({results['compliance'].get('risk_band', 'None')})")
 
     print("[*] AI analysis (local SLM; falls back if unavailable)...")
     try:
@@ -230,6 +295,7 @@ def main():
         ai_result = {"executive_summary": f"AI unavailable: {e}",
                      "overall_risk": "Unknown", "risk_score": 0,
                      "top_findings": [], "technical_remediation": [],
+                     "compliance_summary": "",
                      "conclusion": ""}
     try:
         ai_result = apply_verification(enriched, ai_result, scan_id=scan_id)

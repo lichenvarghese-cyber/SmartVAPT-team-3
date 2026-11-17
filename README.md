@@ -30,6 +30,8 @@ The developers accept no liability for misuse and criminal proceedings may be in
 | **AI Reporting** | Local small language model (SLM) via Ollama (`ai_engine.py`) | Executive summary, per-finding impact analysis, prioritized remediation roadmap (optional — runs locally, no API key, data never leaves the machine) |
 | **PDF Report** | fpdf2 | Branded assessment report: `SmartVAPT_<scan_id>.pdf` |
 | **Data Verification** | `verification.py` | Matches every structured AI claim to a scan finding, drops ungrounded claims, and stamps the report with a SHA-256 findings digest |
+| **Provider Guardrails** | `infrastructure_mapper.py` | Classifies CDN/WAF, cloud, PaaS, shared hosting, ISP and private addresses; switches to passive/throttled mode, throttles Nuclei/gobuster, and records abuse/security contacts and suggested pivots |
+| **Compliance Mapping** | `compliance_mapper.py` | Deterministic OWASP Top 10 (2021), NIST CSF and PCI-DSS mapping per finding, with an exposure index and C-level summary (Section M) |
 
 ### Sample output from a real run (`scanme.nmap.org`)
 
@@ -80,6 +82,32 @@ Every AI-generated structured claim (top findings and technical remediation) is 
 - The report (PDF/JSON/HTML) carries a provenance stamp: scan ID, finding count, and a SHA-256 digest of the findings.
 
 This makes the structured report data **traceable to SmartVAPT's own scan results**.
+
+### 🛡️ Provider-Aware Scan Guardrails
+
+`infrastructure_mapper.py` turns the hosting lookup into scan behaviour:
+
+| Detected provider | Behaviour |
+|---|---|
+| **CDN / WAF** (Cloudflare, Akamai, CloudFront, Fastly, Imperva, Sucuri, …) | **Passive mode** — network/Nuclei/directory/sensitive-path/API active checks are skipped to avoid WAF bans and to stop treating edge IPs as the client's origin. Passive web headers, TLS, DNS and subdomain recon still run |
+| **Shared hosting** (GoDaddy, HostGator, Bluehost, Hostinger, …) | **Throttled mode** — Nuclei rate ≤ 5 req/s, gobuster ≤ 3 threads, request delays, plus a shared-tenant warning in the report |
+| **PaaS / serverless** (Vercel, Netlify, Heroku, Render, Fly.io, …) | OS/kernel CVE scanning is disabled; app/API checks stay enabled |
+| **Cloud** (AWS, Azure, GCP, DigitalOcean, Linode, …) | Standard mode plus cloud-specific focus (object storage, IMDS, IAM, ingress) |
+| **Unknown / ISP / private** | Standard mode (still rate-bounded) |
+
+The mapper also collects public **RDAP abuse contacts**, the target's **`security.txt`**, and **candidate pivot prefixes** (resolved /24s plus BGPView ASN prefixes). Pivots are **never scanned automatically** — they are suggestions that require separate written authorization.
+
+A sidebar checkbox can override the guardrails for an explicitly authorized CDN/shared-host test. The override still keeps concurrency and request rates low, and the report records that the override was used.
+
+### 🧭 Compliance Mapping (OWASP / NIST / PCI-DSS)
+
+Every finding is mapped deterministically (never guessed by the SLM) to:
+
+- **OWASP Top 10 (2021)** — including API Security hints used by the API scanner;
+- **NIST CSF** controls (e.g., `PR.AC-4`, `DE.CM-8`);
+- **PCI-DSS** requirements (v3.2.1 numbering; validate v4.0 with a QSA).
+
+The dashboard's **Provider & Compliance** tab and PDF **Section M** show an exposure index (0–100), risk band, per-framework control counts and a C-level narrative. Mappings are indicative and do not constitute a formal audit opinion.
 
 ### 🎛️ Finding Filters (Sidebar)
 
@@ -214,11 +242,13 @@ SmartVAPT/
 ├── config.py            # API key, model, report branding
 ├── network_scanner.py   # Nmap + vulners wrapper
 ├── web_scanner.py       # Web header/TLS/dir checks + DNS scanner
+├── infrastructure_mapper.py # Provider classification, abuse contacts, pivots, guardrails
+├── compliance_mapper.py # OWASP Top 10 / NIST CSF / PCI-DSS mapping + exposure summary
 ├── ai_engine.py         # Local SLM-powered narrative generation + MITRE ATT&CK mapping
 ├── verification.py      # AI claim grounding + SHA-256 provenance stamp + MITRE ATT&CK support
 ├── findings.py          # Finding dataclass + severity normalization
-├── scoring.py           # CVSS scoring, severity, remediation playbooks
-├── report_gen.py        # fpdf2 PDF report generator (conditional sections + MITRE summary)
+├── scoring.py           # CVSS scoring, severity, remediation playbooks, compliance enrichment
+├── report_gen.py        # fpdf2 PDF report generator (conditional sections + MITRE/L/M summaries)
 ├── exporters.py         # JSON/HTML/SARIF export + verification records
 ├── evidence.py          # Per-scan raw evidence store
 ├── requirements.txt

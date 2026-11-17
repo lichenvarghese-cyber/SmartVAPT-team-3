@@ -72,3 +72,43 @@ def test_mitre_map_is_deterministic():
     assert mitre_for({"title": "OpenSSH 8.9p1 vulnerable"}) == "T1021.004"
     assert mitre_for({"title": "SQL injection in login form"}) == "T1190"
     assert mitre_for({"title": "No matching technique here"}) is None
+
+
+def test_pdf_includes_infrastructure_and_compliance_sections(tmp_path):
+    """Sections L/M must render provider guardrails and framework posture."""
+    if report_gen._find_font(report_gen._FONT_CANDIDATES["reg"]) is None:
+        pytest.skip("no TrueType font available on this machine")
+    from compliance_mapper import summarize
+    from scoring import enrich_findings
+
+    scan = _scan()
+    scan["findings"] = enrich_findings(scan["findings"])
+    scan["compliance"] = summarize(scan["findings"])
+    scan["infrastructure"] = {
+        "provider_label": "Cloudflare (CDN / WAF)",
+        "provider": "Cloudflare", "asn": "AS13335",
+        "as_name": "CLOUDFLARENET", "recommended_mode": "passive",
+        "mode_reason": "CDN/WAF detected.",
+        "cdn_detected": True, "waf_detected": True,
+        "cloud_detected": False, "paas_detected": False,
+        "shared_hosting": False,
+        "geo_summary": "Test · Cloudflare (AS13335)",
+        "warnings": ["CDN/WAF provider detected."],
+        "abuse_contacts": ["abuse@cloudflare.com"],
+        "security_txt": {"found": True, "url": "https://example.com/.well-known/security.txt",
+                         "expires": "2027-01-01T00:00:00Z"},
+        "pivot_targets": ["203.0.113.0/24"],
+        "pivot_note": "Verify authorization before scanning.",
+        "pivot_lookup_urls": ["https://bgp.he.net/AS13335"],
+        "guardrails": {"allow_network": False, "allow_nuclei": False,
+                       "allow_directory_bruteforce": False,
+                       "allow_sensitive_paths": False, "allow_api": False,
+                       "nuclei_rate_limit": 5, "gobuster_threads": 2,
+                       "request_delay": 0.5, "overridden": False},
+        "dynamic_focus": ["Passive OSINT only."],
+    }
+    ai = _ai()
+    ai["compliance_summary"] = "The target has material PCI-DSS exposure."
+    out = tmp_path / "report_infra_compliance.pdf"
+    report_gen.generate_report(scan, ai, str(out))
+    assert out.exists() and out.stat().st_size > 1000

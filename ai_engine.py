@@ -83,6 +83,7 @@ Return ONLY valid JSON in this schema:
   "technical_remediation": [
     {"finding_id": "exact id from the findings list", "finding": "...", "owasp": "...", "mitre_attack": "T####", "steps": ["...", "..."], "commands": ["..."]}
   ],
+  "compliance_summary": "2-4 sentence C-level summary of the audit/compliance exposure using only the supplied compliance data",
   "conclusion": "..."
 }
 Every finding_id MUST be copied verbatim from the supplied findings list.
@@ -159,6 +160,7 @@ class AIEngine:
                 ("risk_score", 0),
                 ("top_findings", []),
                 ("technical_remediation", []),
+                ("compliance_summary", ""),
                 ("conclusion", ""),
             ):
                 parsed.setdefault(key, default)
@@ -182,6 +184,7 @@ class AIEngine:
                 "risk_score": 0,
                 "top_findings": [],
                 "technical_remediation": [],
+                "compliance_summary": "",
                 "conclusion": "Local SLM returned a non-JSON response.",
             }
         except Exception as e:
@@ -260,6 +263,13 @@ class AIEngine:
                     float(f.get("cvss") or 0))
         top = sorted(findings, key=rank, reverse=True)[:10]
 
+        try:
+            from compliance_mapper import summarize as _summarize_compliance
+            compliance_summary = _summarize_compliance(findings).get(
+                "c_level_summary", "")
+        except Exception:
+            compliance_summary = ""
+
         return {
             "executive_summary": summary,
             "overall_risk": risk,
@@ -276,5 +286,6 @@ class AIEngine:
                  "steps": [f.get("remediation", "See finding description.")],
                  "commands": []} for f in top if f.get("severity") in ("critical", "high")
             ],
+            "compliance_summary": compliance_summary,
             "conclusion": "",
         }

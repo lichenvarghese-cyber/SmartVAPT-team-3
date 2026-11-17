@@ -149,6 +149,146 @@ def _safe_multi(pdf, text, line_h=5, size=10, font="DejaVu", style=""):
     pdf.set_x(pdf.l_margin)
 
 
+def _appendix_heading(pdf, text: str):
+    pdf.set_font("DejaVu", "B", 13)
+    pdf.set_text_color(0, 60, 120)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(0, 9, _clean_text(text), ln=True)
+    pdf.set_text_color(30, 30, 30)
+    pdf.set_x(pdf.l_margin)
+
+
+def _kv_line(pdf, key: str, value):
+    pdf.set_font("DejaVu", "B", 9)
+    pdf.set_text_color(60, 60, 60)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(46, 6, _clean_text(f"{key}:"), border=0)
+    pdf.set_font("DejaVu", "", 9)
+    pdf.set_text_color(30, 30, 30)
+    pdf.set_x(pdf.l_margin + 46)
+    pdf.multi_cell(0, 6, _clean_text(value if value not in (None, "") else "—"))
+    pdf.set_x(pdf.l_margin)
+
+
+def _render_infrastructure(pdf, infra: dict):
+    """Section L: provider classification, contacts and scan guardrails."""
+    _appendix_heading(pdf, "L. Infrastructure & Scan Guardrails")
+    _kv_line(pdf, "Provider", infra.get("provider_label") or infra.get("provider"))
+    _kv_line(pdf, "ASN", infra.get("asn") or "Unknown")
+    _kv_line(pdf, "AS name", infra.get("as_name") or "Unknown")
+    _kv_line(pdf, "Scan mode", str(infra.get("recommended_mode") or "standard").title())
+    _kv_line(pdf, "Mode reason", infra.get("mode_reason") or "—")
+    flags = []
+    for key, label in (("cdn_detected", "CDN"), ("waf_detected", "WAF"),
+                       ("cloud_detected", "Cloud"), ("paas_detected", "PaaS"),
+                       ("shared_hosting", "Shared hosting")):
+        if infra.get(key):
+            flags.append(label)
+    _kv_line(pdf, "Detected traits", ", ".join(flags) or "None")
+    if infra.get("geo_summary"):
+        _kv_line(pdf, "Hosting summary", infra["geo_summary"])
+
+    warnings = infra.get("warnings")
+    warnings = warnings if isinstance(warnings, list) else []
+    if warnings:
+        _safe_multi(pdf, "Provider warnings:", size=10, style="B")
+        for warning in warnings:
+            _safe_multi(pdf, f"  - {warning}", line_h=4, size=9)
+
+    if infra.get("legal_notice"):
+        _safe_multi(pdf, "Legal / acceptable-use notice:", size=10, style="B")
+        _safe_multi(pdf, infra["legal_notice"], line_h=4, size=9)
+
+    contacts = infra.get("abuse_contacts")
+    contacts = contacts if isinstance(contacts, list) else []
+    _safe_multi(pdf, "Abuse / security contacts:", size=10, style="B")
+    _safe_multi(pdf, "  " + (", ".join(str(c) for c in contacts) if contacts else
+                              "No public abuse contact found."), line_h=4, size=9)
+    security = infra.get("security_txt")
+    security = security if isinstance(security, dict) else {}
+    if security.get("found"):
+        _safe_multi(pdf, f"  security.txt: {security.get('url')}", line_h=4, size=9)
+        if security.get("expires"):
+            _safe_multi(pdf, f"  security.txt expires: {security['expires']}",
+                        line_h=4, size=9)
+
+    pivots = infra.get("pivot_targets")
+    pivots = pivots if isinstance(pivots, list) else []
+    if pivots:
+        _safe_multi(pdf, "Suggested pivot targets (not scanned automatically):",
+                    size=10, style="B")
+        for prefix in pivots[:12]:
+            _safe_multi(pdf, f"  - {prefix}", line_h=4, size=9)
+        if infra.get("pivot_note"):
+            _safe_multi(pdf, infra["pivot_note"], line_h=4, size=8)
+    lookup_urls = infra.get("pivot_lookup_urls")
+    for url in (lookup_urls if isinstance(lookup_urls, list) else []):
+        _safe_multi(pdf, f"  lookup: {url}", line_h=4, size=8)
+
+    guard = infra.get("guardrails")
+    guard = guard if isinstance(guard, dict) else {}
+    _safe_multi(pdf, "Applied guardrails:", size=10, style="B")
+    guard_labels = (
+        ("allow_network", "Network / OS scan"),
+        ("allow_nuclei", "Nuclei templates"),
+        ("allow_directory_bruteforce", "Directory brute-force"),
+        ("allow_sensitive_paths", "Sensitive-path probing"),
+        ("allow_api", "API active checks"),
+    )
+    for key, label in guard_labels:
+        _safe_multi(pdf, f"  - {label}: {'allowed' if guard.get(key) else 'skipped'}",
+                    line_h=4, size=9)
+    _safe_multi(pdf, f"  - Nuclei rate limit: {guard.get('nuclei_rate_limit', '—')} req/s",
+                line_h=4, size=9)
+    _safe_multi(pdf, f"  - Gobuster threads: {guard.get('gobuster_threads', '—')}; "
+                     f"request delay: {guard.get('request_delay', 0)}s",
+                line_h=4, size=9)
+    if guard.get("overridden"):
+        _safe_multi(pdf, "  OPERATOR OVERRIDE: active scanning was explicitly "
+                         "re-enabled for this authorised test.", line_h=4, size=9)
+    focus = infra.get("dynamic_focus")
+    focus = focus if isinstance(focus, list) else []
+    if focus:
+        _safe_multi(pdf, "Dynamic focus for this provider:", size=10, style="B")
+        for item in focus:
+            _safe_multi(pdf, f"  - {item}", line_h=4, size=9)
+
+
+def _render_compliance_posture(pdf, compliance: dict, ai_result: dict):
+    """Section M: OWASP/NIST/PCI posture and C-level narrative."""
+    _appendix_heading(pdf, "M. Compliance Posture")
+    _kv_line(pdf, "Exposure index", f"{compliance.get('exposure_index', 0)}/100")
+    _kv_line(pdf, "Risk band", compliance.get("risk_band", "None"))
+    _kv_line(pdf, "Mapped findings", compliance.get("mapped_findings", 0))
+    sev = compliance.get("severity_counts")
+    sev = sev if isinstance(sev, dict) else {}
+    _kv_line(pdf, "Severity mix",
+             f"critical {sev.get('critical', 0)}, high {sev.get('high', 0)}, "
+             f"medium {sev.get('medium', 0)}, low {sev.get('low', 0)}, "
+             f"info {sev.get('info', 0)}")
+
+    ai_comp = ai_result.get("compliance_summary") if isinstance(ai_result, dict) else ""
+    _safe_multi(pdf, ai_comp or compliance.get("c_level_summary")
+                or "No compliance summary available.", line_h=5, size=10)
+
+    for heading, key in (("OWASP Top 10 (2021)", "owasp"),
+                         ("PCI-DSS requirements", "pci_dss"),
+                         ("NIST CSF controls", "nist_csf")):
+        bucket = compliance.get(key) or {}
+        if not isinstance(bucket, dict) or not bucket:
+            continue
+        _safe_multi(pdf, heading, size=10, style="B")
+        for ref, item in list(bucket.items())[:10]:
+            if not isinstance(item, dict):
+                continue
+            _safe_multi(
+                pdf,
+                f"  - {ref}: {item.get('count', 0)} finding(s), "
+                f"risk weight {item.get('weight', 0)}",
+                line_h=4, size=9)
+    _safe_multi(pdf, compliance.get("disclaimer") or "", line_h=4, size=8)
+
+
 def generate_report(scan_data: dict, ai_result: dict,
                     output_path: str = "SmartVAPT_Report.pdf",
                     include_exec_summary: bool = True,
@@ -163,6 +303,8 @@ def generate_report(scan_data: dict, ai_result: dict,
     ai_result["technical_remediation"] = _as_dicts(ai_result.get("technical_remediation"))
     if not isinstance(ai_result.get("verification"), dict):
         ai_result["verification"] = {}
+    if not isinstance(ai_result.get("compliance_summary"), str):
+        ai_result["compliance_summary"] = ""
     # Small models often return a single string where the schema asks for a
     # list. Never iterate a string character-by-character in the PDF.
     for item in ai_result["technical_remediation"]:
@@ -333,6 +475,18 @@ def generate_report(scan_data: dict, ai_result: dict,
         pdf.set_x(pdf.l_margin)
         pdf.cell(0, 6, "No MITRE ATT&CK techniques were identified in the AI output.", ln=True)
         pdf.set_text_color(30, 30, 30)
+
+    # ---------- L. Infrastructure & Scan Guardrails ----------
+    infra = scan_data.get("infrastructure") or {}
+    if isinstance(infra, dict) and infra and not infra.get("error"):
+        pdf.add_page()
+        _render_infrastructure(pdf, infra)
+
+    # ---------- M. Compliance Posture ----------
+    compliance = scan_data.get("compliance") or {}
+    if isinstance(compliance, dict) and compliance:
+        pdf.add_page()
+        _render_compliance_posture(pdf, compliance, ai_result)
 
     pdf.output(output_path)
     return output_path

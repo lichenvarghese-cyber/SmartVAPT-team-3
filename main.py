@@ -8,11 +8,14 @@ import exporters
 from ai_engine import AIEngine, check_engine
 from api_scanner import APIScanner
 from command_tracker import tracker
+from compliance_mapper import compliance_rows, summarize as summarize_compliance
 from config import SLM_BASE_URL, SLM_MODEL, SLM_PROVIDER
 from eta_estimator import ScanEta, fmt_eta
 from evidence import EvidenceStore, new_scan_id
 from findings import FindingSet
 from geo_locator import GeoLocator
+from infrastructure_mapper import (InfrastructureMapper, apply_override,
+                                   default_guardrails)
 from network_scanner import NetworkScanner
 from nuclei_scanner import NucleiScanner
 from report_gen import generate_report
@@ -94,6 +97,17 @@ with st.sidebar:
                                 "which hosting provider the website is set "
                                 "up on (ISP / org / ASN). Uses free public "
                                 "GeoIP APIs; private IPs are never sent out.")
+    scan_guardrails = st.checkbox("Provider-aware safety guardrails", value=True,
+                                  help="Classify the host/CDN/cloud/PaaS and "
+                                       "automatically switch to passive or "
+                                       "throttled scanning when appropriate. "
+                                       "Also collects public RDAP/BGP/abuse "
+                                       "contacts and security.txt.")
+    guardrail_override = st.checkbox(
+        "Override guardrails (authorized targets only)", value=False,
+        help="Re-enables active scanning when a CDN/WAF or shared host was "
+             "detected. Only use with written authorization; the override "
+             "still keeps concurrency and request rates low.")
     st.markdown("**Extended vectors**")
     ports_mode = st.radio("Port selection",
                           ["Top 1000 most-used ports of all 65535 (recommended)",
@@ -390,9 +404,65 @@ if run:
         results["geo"] = {}
 
     # ----------------------------------------------------------------
+    # 0b) PROVIDER INTELLIGENCE & SCAN GUARDRAILS
+    #     Classify the host/CDN/cloud/PaaS and decide whether active
+    #     scanning is safe. CDN/WAF -> passive, shared hosting -> throttled,
+    #     PaaS -> no OS-level CVE scanning. Pivots are suggestions only.
+    # ----------------------------------------------------------------
+    guardrails = default_guardrails(nuclei_rl)
+    infrastructure: dict = {}
+    if scan_guardrails and not scan_stopped:
+        show_step(8, "Classifying provider & applying guardrails...",
+                  "Provider guardrails")
+        try:
+            infrastructure = InfrastructureMapper(
+                target, evidence=evidence).analyze(
+                    results.get("geo") if scan_geo else None,
+                    requested_nuclei_rate=nuclei_rl)
+            if guardrail_override:
+                infrastructure = apply_override(
+                    infrastructure, requested_nuclei_rate=nuclei_rl)
+            results["infrastructure"] = infrastructure
+            guardrails = infrastructure.get("guardrails") or guardrails
+            mode = infrastructure.get("recommended_mode")
+            reason = infrastructure.get("mode_reason") or ""
+            provider_label = infrastructure.get("provider_label") or "unknown provider"
+            if mode == "passive":
+                st.warning(f"🛡️ Passive mode ({provider_label}) — {reason}")
+            elif mode == "throttled":
+                st.warning(f"🐢 Throttled mode ({provider_label}) — {reason}")
+            elif infrastructure.get("paas_detected"):
+                st.info(f"☁️ PaaS focus ({provider_label}) — {reason}")
+            if infrastructure.get("guardrail_override"):
+                st.warning("⚠️ Provider guardrails were overridden by the "
+                           "operator. Active scanning is only permitted on "
+                           "targets you are explicitly authorized to test.")
+            if infrastructure.get("warnings"):
+                with st.expander("Provider warnings & dynamic focus"):
+                    for warning in infrastructure["warnings"]:
+                        st.warning(warning)
+                    for focus in infrastructure.get("dynamic_focus") or []:
+                        st.markdown(f"- {focus}")
+        except Exception as e:
+            results["infrastructure"] = {"error": str(e)}
+            st.warning(f"Provider classification skipped: {e}")
+        step_done("Provider guardrails")
+    else:
+        results["infrastructure"] = {}
+    results["guardrails"] = guardrails
+
+    # ----------------------------------------------------------------
     # 1) NETWORK
     # ----------------------------------------------------------------
-    if scan_network and not scan_stopped:
+    if scan_network and not scan_stopped and not guardrails.get("allow_network", True):
+        results["network"] = {
+            "skipped": "provider_guardrail",
+            "reason": ("Network/OS scanning disabled by provider guardrails "
+                       f"({infrastructure.get('provider') or 'unknown provider'})."),
+        }
+        st.info("Network scan skipped by provider guardrails. Enable the "
+                "override only if you are authorised to test this host.")
+    elif scan_network and not scan_stopped:
         show_step(15, "Running network scan (Nmap + vulners)...",
                   "Network scan (Nmap)")
         try:
@@ -468,12 +538,24 @@ if run:
             web_result = {
                 "headers": ws.check_headers(),
                 "technologies": ws.detect_technologies(),
-                "directories": ws.gobuster_scan(
+                "directories": (ws.gobuster_scan(
                     progress_cb=run_cb, stop_flag=ctrl,
-                    http_services=http_services),
+                    http_services=http_services,
+                    threads=guardrails.get("gobuster_threads", 20),
+                    delay=guardrails.get("gobuster_delay", ""),
+                    passive=not guardrails.get("allow_directory_bruteforce", True))
+                    if guardrails.get("allow_directory_bruteforce", True)
+                    else {"target": ws.target, "found": [], "findings": [],
+                          "skipped": "provider_guardrail",
+                          "error": "Directory brute-forcing disabled by provider guardrails."}),
                 "tls": ws.analyze_tls(),
                 "robots_sitemap": ws.fetch_robots_sitemap(),
-                "sensitive_paths": ws.probe_sensitive_paths(),
+                "sensitive_paths": (ws.probe_sensitive_paths(
+                    request_delay=guardrails.get("request_delay", 0.0))
+                    if guardrails.get("allow_sensitive_paths", True)
+                    else {"found": [], "findings": [], "discarded": [],
+                          "skipped": "provider_guardrail",
+                          "error": "Sensitive-path probing disabled by provider guardrails."}),
                 "redirects": ws.analyze_redirects(),
             }
             results["web"] = web_result
@@ -531,13 +613,23 @@ if run:
     # ----------------------------------------------------------------
     # 3b) NUCLEI (extended web vector)
     # ----------------------------------------------------------------
-    if scan_nuclei and not scan_stopped:
+    if scan_nuclei and not scan_stopped and not guardrails.get("allow_nuclei", True):
+        results["nuclei"] = {
+            "skipped": "provider_guardrail",
+            "available": False,
+            "matched": [], "findings": [],
+            "error": "Nuclei disabled by provider guardrails (passive mode).",
+        }
+        st.info("Nuclei skipped by provider guardrails (passive mode).")
+    elif scan_nuclei and not scan_stopped:
         show_step(74, "Running Nuclei template scan...", "Nuclei templates")
         try:
             nuc_target = ((results.get("web") or {}).get("directories") or {}).get("target") \
                 or (results.get("network") or {}).get("primary_http_url") or target
+            effective_rl = min(int(nuclei_rl),
+                               int(guardrails.get("nuclei_rate_limit", nuclei_rl)))
             nsc = NucleiScanner(nuc_target, evidence=evidence,
-                                rate_limit=nuclei_rl,
+                                rate_limit=effective_rl,
                                 auth_headers=auth_headers)
             nuc_result = nsc.scan(progress_cb=run_cb, stop_flag=ctrl)
             results["nuclei"] = nuc_result
@@ -601,7 +693,14 @@ if run:
     # ----------------------------------------------------------------
     # 3d) API SECURITY CHECKS
     # ----------------------------------------------------------------
-    if scan_api and not scan_stopped:
+    if scan_api and not scan_stopped and not guardrails.get("allow_api", True):
+        results["api"] = {
+            "skipped": "provider_guardrail",
+            "endpoints": [], "findings": [],
+            "errors": ["API checks disabled by provider guardrails (passive mode)."],
+        }
+        st.info("API checks skipped by provider guardrails (passive mode).")
+    elif scan_api and not scan_stopped:
         show_step(81, "Running API security checks...", "API security checks")
         try:
             asc = APIScanner(target, evidence=evidence, auth_headers=auth_headers)
@@ -635,31 +734,11 @@ if run:
     # Deterministic CVSS normalization + remediation playbooks first, so the
     # report is complete even when the AI is unavailable.
     enriched = enrich_findings(findings.to_dict_list())
-    engine = None
-    try:
-        engine = AIEngine(model=slm_choice)
-        ai_result = engine.analyze(enriched, results)
-    except Exception as e:
-        ai_result = {
-            "executive_summary": f"AI unavailable: {e}",
-            "overall_risk": "Unknown",
-            "risk_score": 0,
-            "top_findings": [],
-            "technical_remediation": [],
-            "conclusion": "",
-        }
-    # Ground every structured AI claim in this scan's findings and attach a
-    # SHA-256 provenance record. Ungrounded claims are dropped.
-    try:
-        ai_result = apply_verification(enriched, ai_result, scan_id=scan_id)
-        results["verification"] = ai_result.get("verification")
-    except Exception as e:
-        results["verification"] = {"verified": False, "status": "error",
-                                   "error": str(e), "scan_id": scan_id}
 
-    # --- New: apply UI finding filters ---
+    # --- Apply UI finding filters before AI/report generation ---
     # filter_severity and filter_vector come from the sidebar expander;
-    # if present, narrow the enriched findings list before it is exposed.
+    # narrowing here means the AI prompt, compliance summary, PDF and UI all
+    # describe exactly the findings the user chose to report.
     try:
         fs = set(filter_severity) if 'filter_severity' in globals() else None
         fv = set(filter_vector) if 'filter_vector' in globals() else None
@@ -672,6 +751,36 @@ if run:
         if fv:
             filt = [f for f in filt if str(f.get("vector") or "").lower() in fv]
         enriched = filt
+    # Deterministic compliance posture is available even when the SLM is
+    # offline and is passed to the model as grounding context.
+    results["compliance"] = summarize_compliance(enriched)
+
+    engine = None
+    try:
+        engine = AIEngine(model=slm_choice)
+        ai_result = engine.analyze(enriched, results)
+    except Exception as e:
+        ai_result = {
+            "executive_summary": f"AI unavailable: {e}",
+            "overall_risk": "Unknown",
+            "risk_score": 0,
+            "top_findings": [],
+            "technical_remediation": [],
+            "compliance_summary": "",
+            "conclusion": "",
+        }
+    # Ground every structured AI claim in this scan's findings and attach a
+    # SHA-256 provenance record. Ungrounded claims are dropped.
+    try:
+        ai_result = apply_verification(enriched, ai_result, scan_id=scan_id)
+        results["verification"] = ai_result.get("verification")
+    except Exception as e:
+        results["verification"] = {"verified": False, "status": "error",
+                                   "error": str(e), "scan_id": scan_id}
+
+    # --- New: apply UI finding filters ---
+    # (Filters were applied before AI/report generation above; this block is
+    # intentionally left out so the summary and the report cannot diverge.)
     results["findings"] = enriched
     # Persist the latest findings for the sidebar remediation tracker. The
     # sidebar renders on the next rerun and reads this from session state.
@@ -794,8 +903,9 @@ if run:
     # ----------------------------------------------------------------
     # TABS
     # ----------------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["Network", "Web", "DNS", "Recon / API", "All Findings", "Location"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+        ["Network", "Web", "DNS", "Recon / API", "All Findings", "Location",
+         "Provider & Compliance"])
 
     # ================== NETWORK TAB ==================
     with tab1:
@@ -993,10 +1103,21 @@ if run:
     with tab5:
         all_findings = enriched
         if all_findings:
-            df = pd.DataFrame(all_findings)
-            cols = [c for c in ["id", "vector", "severity", "title",
-                                 "target", "cve", "cvss", "owasp"] if c in df.columns]
-            st.dataframe(df[cols], use_container_width=True, hide_index=True)
+            rows = []
+            for f in all_findings:
+                comp = f.get("compliance") or {}
+                rows.append({
+                    "ID": f.get("id", ""),
+                    "Severity": str(f.get("severity", "")).upper(),
+                    "Vector": f.get("vector", ""),
+                    "Title": f.get("title", ""),
+                    "Target": f.get("target", ""),
+                    "OWASP": ", ".join(comp.get("owasp") or []),
+                    "PCI-DSS": ", ".join(comp.get("pci_dss") or []),
+                    "NIST CSF": ", ".join(comp.get("nist_csf") or []),
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                         hide_index=True)
             with st.expander("Remediation playbooks"):
                 for f in all_findings[:30]:
                     steps = f.get("remediation_steps") or []
@@ -1071,6 +1192,109 @@ if run:
                        if primary.get("timezone") else ""))
             else:
                 st.info("Website endpoint details unavailable.")
+
+    # ================== PROVIDER & COMPLIANCE TAB ==================
+    with tab7:
+        infra = results.get("infrastructure") or {}
+        st.markdown("#### Provider intelligence")
+        if infra.get("error"):
+            st.error(f"Provider classification error: {infra['error']}")
+        elif not infra:
+            st.info("Provider mapping was not run. Enable **Provider-aware "
+                    "safety guardrails** in the sidebar and re-scan.")
+        else:
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("Provider", infra.get("provider") or "-")
+            p2.metric("Type", infra.get("provider_type_label") or "-")
+            p3.metric("ASN", infra.get("asn") or "-")
+            p4.metric("Scan mode",
+                      str(infra.get("recommended_mode") or "-").title())
+            if infra.get("geo_summary"):
+                st.caption(f"Hosting summary: {infra['geo_summary']}")
+            for warning in infra.get("warnings") or []:
+                st.warning(warning)
+            if infra.get("legal_notice"):
+                st.info(infra["legal_notice"])
+            st.markdown("##### Abuse & security contacts")
+            contacts = infra.get("abuse_contacts") or []
+            if contacts:
+                st.write(" · ".join(f"`{c}`" for c in contacts))
+            else:
+                st.caption("No public abuse contact was found via RDAP or "
+                           "security.txt. Use the ASN/RDAP lookup links below.")
+            security = infra.get("security_txt") or {}
+            if security.get("found"):
+                st.caption(f"security.txt: `{security.get('url')}`"
+                           + (f" · expires {security['expires']}"
+                              if security.get("expires") else ""))
+            with st.expander("Suggested pivot targets (never scanned automatically)"):
+                pivots = infra.get("pivot_targets") or []
+                if pivots:
+                    st.code("\n".join(pivots), language="text")
+                else:
+                    st.caption("No public prefixes were derived.")
+                for url in infra.get("pivot_lookup_urls") or []:
+                    st.markdown(f"- [{url}]({url})")
+                if infra.get("pivot_note"):
+                    st.caption(infra["pivot_note"])
+            st.markdown("##### Active guardrails")
+            guard = infra.get("guardrails") or {}
+            guard_rows = [
+                {"Control": "Network / OS scan",
+                 "Setting": "allowed" if guard.get("allow_network") else "skipped"},
+                {"Control": "Nuclei templates",
+                 "Setting": "allowed" if guard.get("allow_nuclei") else "skipped"},
+                {"Control": "Directory brute-force",
+                 "Setting": "allowed" if guard.get("allow_directory_bruteforce") else "skipped"},
+                {"Control": "Sensitive-path probing",
+                 "Setting": "allowed" if guard.get("allow_sensitive_paths") else "skipped"},
+                {"Control": "API active checks",
+                 "Setting": "allowed" if guard.get("allow_api") else "skipped"},
+                {"Control": "Nuclei rate limit (req/s)",
+                 "Setting": str(guard.get("nuclei_rate_limit", "-"))},
+                {"Control": "Gobuster threads",
+                 "Setting": str(guard.get("gobuster_threads", "-"))},
+                {"Control": "Request delay (s)",
+                 "Setting": str(guard.get("request_delay", 0))},
+            ]
+            st.dataframe(pd.DataFrame(guard_rows), use_container_width=True,
+                         hide_index=True)
+            if guard.get("overridden"):
+                st.warning("Guardrails were overridden by the operator for "
+                           "this scan. Confirm written authorization.")
+            focus = infra.get("dynamic_focus") or []
+            if focus:
+                st.markdown("##### Dynamic focus for this provider")
+                for item in focus:
+                    st.markdown(f"- {item}")
+
+        st.markdown("---")
+        st.markdown("#### Compliance posture")
+        comp = results.get("compliance") or {}
+        if not comp:
+            st.info("No compliance summary was generated for this scan.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Exposure index", f"{comp.get('exposure_index', 0)}/100")
+            c2.metric("Risk band", comp.get("risk_band", "None"))
+            c3.metric("Mapped findings", comp.get("mapped_findings", 0))
+            sev = comp.get("severity_counts") or {}
+            c4.metric("Critical + High",
+                      int(sev.get("critical", 0)) + int(sev.get("high", 0)))
+            st.info(comp.get("c_level_summary") or "No compliance summary.")
+            for label, key in (("OWASP Top 10 (2021)", "owasp"),
+                               ("PCI-DSS requirements", "pci_dss"),
+                               ("NIST CSF controls", "nist_csf")):
+                rows = compliance_rows(comp, key)
+                with st.expander(f"{label} — {len(rows)} affected",
+                                 expanded=(key == "owasp")):
+                    if rows:
+                        st.dataframe(pd.DataFrame(rows),
+                                     use_container_width=True,
+                                     hide_index=True)
+                    else:
+                        st.caption("No findings mapped to this framework.")
+            st.caption(comp.get("disclaimer") or "")
 
     # ----------------------------------------------------------------
     # MULTI-FORMAT EXPORTS
