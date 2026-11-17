@@ -1,6 +1,6 @@
 # 🛡️ SmartVAPT — Tri-Vector Attack Surface Analyzer & AI Reporting Engine
 
-SmartVAPT is an automated Vulnerability Assessment & Penetration Testing (VAPT) tool with a Streamlit dashboard. It combines **three scan vectors** — network, web application, and DNS/email security — into a single workflow and produces a professional, evidence-backed **PDF report**, optionally enriched with **AI-generated narratives** from a **local small language model (Ollama)** — no cloud API keys and no scan data leaving the machine.
+SmartVAPT is an automated Vulnerability Assessment & Penetration Testing (VAPT) tool with a Streamlit dashboard. It combines **three core scan vectors** — network, web application, and DNS/email security — into one workflow and adds provider-aware scan guardrails, deterministic compliance mapping, per-finding fix verification, and a professional evidence-backed **PDF report**. Reports can be enriched with narratives from a **local small language model (Ollama)** — no cloud API keys and no scan data leaving the machine.
 
 Built as part of the **ICT Academy of Kerala – Cyber Security Analyst (VAPT)** program.
 
@@ -9,213 +9,223 @@ Built as part of the **ICT Academy of Kerala – Cyber Security Analyst (VAPT)**
 ## ⚠️ Legal Disclaimer / Authorized Use Only
 
 Scanning networks and applications you do not own or have **written permission** to test is illegal in most jurisdictions. Use SmartVAPT only against:
+
 - Systems you own
 - Targets with explicit written authorization (e.g., a signed scope document)
 - Public test targets such as `scanme.nmap.org` or DVWA-style labs
 
-The developers accept no liability for misuse and criminal proceedings may be initiated against perpetrators in various jurisdictions.
+Provider guardrails reduce load on shared infrastructure, but they do **not** grant authorization. When a target is fronted by a CDN/WAF or hosted on a shared platform, the provider's acceptable-use policy may also apply — confirm scope with the asset owner and, where required, the provider. The developers accept no liability for misuse.
 
 ---
 
 ## 🔍 What It Does
 
-| Vector | Tooling | Checks |
+| Capability | Module | Checks |
 |---|---|---|
-| **Network Scan** | Nmap (`--top-ports 1000` default = the 1000 most-used ports of all 65535; custom ranges via `-p`) + `vulners` NSE script + version detection `-sV` | Port discovery, service/version detection, CVE correlation. HTTP-speaking ports are located by `-sV` and passed to the web vector |
-| **Web App Audit** | Python requests, OpenSSL, gobuster (targets the nmap `-sV`-detected HTTP port — not hardcoded 80), **Nuclei (default template scanner)** | HTTP security headers, TLS analysis, technology fingerprinting, directory & sensitive-path enumeration on the confirmed HTTP port, Nuclei template matches, robots.txt/sitemap review |
-| **DNS / Email Security** | `dig` / host lookups | SPF record, DMARC record, MX and related DNS hygiene |
-| **IP Geolocation & Hosting** | `geo_locator.py` (free GeoIP APIs: ip-api.com / ipwho.is) | Locate the target IP (country/region/city, lat/lon, timezone), identify where the website is set up (hosting provider, ISP, ASN, reverse DNS) and the web server port/software. Private IPs are never sent to external services |
-| **Findings Engine** | `findings.py` | Normalizes all findings, deduplicates, assigns severity (Critical / High / Medium / Low / Info) |
-| **Evidence Store** | `evidence.py` | Saves raw tool output per scan (`evidence/<scan_id>/`) so every finding is reproducible |
-| **AI Reporting** | Local small language model (SLM) via Ollama (`ai_engine.py`) | Executive summary, per-finding impact analysis, prioritized remediation roadmap (optional — runs locally, no API key, data never leaves the machine) |
-| **PDF Report** | fpdf2 | Branded assessment report: `SmartVAPT_<scan_id>.pdf` |
-| **Data Verification** | `verification.py` | Matches every structured AI claim to a scan finding, drops ungrounded claims, and stamps the report with a SHA-256 findings digest |
-| **Provider Guardrails** | `infrastructure_mapper.py` | Classifies CDN/WAF, cloud, PaaS, shared hosting, ISP and private addresses; switches to passive/throttled mode, throttles Nuclei/gobuster, and records abuse/security contacts and suggested pivots |
-| **Compliance Mapping** | `compliance_mapper.py` | Deterministic OWASP Top 10 (2021), NIST CSF and PCI-DSS mapping per finding, with an exposure index and C-level summary (Section M) |
-| **Verify Fix** | `verify_fix.py` | Per-finding, read-only re-test (headers, sensitive files, TLS, SPF/DMARC, ports, GraphQL, HTTP methods, redirects, API docs) that reports fixed / still present / inconclusive |
+| **Network Scan** | `network_scanner.py` | Nmap (`--top-ports 1000` by default; custom ranges via `-p`) + `vulners` NSE + `-sV`. Port discovery, service/version detection, CVE correlation. HTTP-speaking ports are located by `-sV` and passed to the web vector |
+| **Web App Audit** | `web_scanner.py` | HTTP security headers, TLS analysis, technology fingerprinting, directory/sensitive-path enumeration on the detected HTTP port, robots.txt/sitemap review, redirect checks |
+| **Nuclei Templates** | `nuclei_scanner.py` | Template-based checks with a configurable rate limit; skipped gracefully if the binary is absent |
+| **DNS / Email Security** | `web_scanner.py` (`DNSScanner`) | SPF and DMARC records, policy strength and email-spoofing exposure |
+| **Subdomain Recon** | `subdomain_scanner.py` | Certificate-transparency enumeration + DNS brute force and dangling-CNAME takeover detection (no takeover attempted) |
+| **API Security** | `api_scanner.py` | Swagger/OpenAPI and GraphQL discovery, HTTP verb probing, JWT weaknesses, rate-limit smoke test and common API misconfigurations |
+| **IP Geolocation & Hosting** | `geo_locator.py` | Country/region/city, ISP, organisation, ASN, reverse DNS and web-server details from free GeoIP APIs. Private IPs are never sent externally |
+| **Provider Guardrails** | `infrastructure_mapper.py` | CDN/WAF, cloud, PaaS, shared hosting, ISP and private-address classification; passive/throttled modes; RDAP abuse contacts, `security.txt` and suggested ASN pivots |
+| **Compliance Mapping** | `compliance_mapper.py` | Deterministic OWASP Top 10 (2021), NIST CSF and PCI-DSS mapping per finding, exposure index and C-level summary |
+| **Verify Fix** | `verify_fix.py` | Per-finding, read-only re-test after remediation: fixed / still present / inconclusive / skipped |
+| **Findings Engine** | `findings.py`, `scoring.py` | Normalization, deduplication, CVSS/severity, remediation playbooks, MITRE ATT&CK guidance |
+| **Evidence Store** | `evidence.py` | Raw tool output per scan (`evidence/<scan_id>/`) so findings are reproducible |
+| **AI Reporting** | `ai_engine.py` | Executive summary, per-finding impact, prioritized remediation and compliance narrative from a local SLM |
+| **AI Verification** | `verification.py` | Matches every structured AI claim to a real finding, drops ungrounded claims and stamps a SHA-256 provenance record |
+| **PDF Report** | `report_gen.py` | Branded report: `SmartVAPT_<scan_id>.pdf`, including Sections L (infrastructure/guardrails) and M (compliance) |
+| **Exports** | `exporters.py` | JSON, HTML dashboard and SARIF 2.1.0 |
 
-### Sample output from a real run (`scanme.nmap.org`)
+### Sample output from a real run
+
+Quick web + DNS scan (`--no-network --no-nuclei`), 17 Nov 2026:
 
 ```
-Scan ID: 20260926_025200
-Ports  2 open (80/tcp http, 443/tcp https)
-Findings: 111 total → 23 critical / 34 high / 35 medium / 19 info
-Email   : ❌ No SPF record   ❌ No DMARC record
-Web     : ✔ TLS enabled, missing hardening headers flagged
-Report: SmartVAPT_20260926_025200.pdf (generated successfully)
+Scan ID  : 20261117_145220
+Target   : scanme.nmap.org
+Provider : Linode / Akamai Cloud (Cloud infrastructure) · mode: standard
+Findings : 7 total → 2 high / 5 medium
+DNS      : Missing SPF record, Missing DMARC record
+Web      : 5 missing security headers
+Compliance: 70/100 (Critical) · 7 mapped findings
+Report   : SmartVAPT_20261117_145220.pdf (10 pages, Sections L/M)
+Elapsed  : ~42 s
 ```
 
-### 🤖 AI-Powered Reports (Local Small Language Model)
+CDN/WAF smoke run (`cloudflare.com`): classified **Cloudflare (CDN / WAF) → passive mode**, active checks skipped, abuse contacts and `security.txt` collected, report generated in ~42 s.
 
-The PDF report can be automatically enriched with an **executive summary, per-finding impact analysis, and a prioritized remediation roadmap** generated by a *local* small language model (SLM). All analysis runs on your own machine — scan data never leaves it.
+---
 
-1. Install [Ollama](https://ollama.com) and pull a small model, e.g.:
+## 🤖 AI-Powered Reports (Local Small Language Model)
+
+The PDF can be enriched with an **executive summary, per-finding impact analysis, a prioritized remediation roadmap and a compliance narrative** generated by a *local* small language model. All analysis runs on your machine — scan data never leaves it.
+
+1. Install [Ollama](https://ollama.com) and pull a small model:
    ```bash
    ollama pull phi3:mini
    ```
-   (Other good small models: `gemma2:2b`, `llama3.2:3b`, `qwen2.5:3b`.)
-2. Make sure the Ollama server is running (`ollama serve`).
-3. Optionally override the model/endpoint via environment variables:
+   Other good options: `gemma2:2b`, `llama3.2:3b`, `qwen2.5:3b`.
+2. Keep the server running:
+   ```bash
+   ollama serve
+   ```
+3. Optional overrides:
    ```bash
    export SLM_MODEL="phi3:mini"
    export SLM_BASE_URL="http://localhost:11434"
    export SLM_PROVIDER="ollama"
    ```
-4. Launch the dashboard and the AI section runs automatically:
+4. Launch SmartVAPT:
    ```bash
    streamlit run main.py
    ```
-5. Download the PDF — AI narratives are embedded per finding and in the executive summary.
 
-> The sidebar shows a live badge: **🟢 AI ready**, **🟡 AI model missing**, or **🔴 AI offline**. Click it to see the endpoint, pick an installed model, or copy the setup commands. After a scan, a banner tells you whether the narrative really came from the model or from the deterministic fallback.
+The sidebar shows **🟢 AI ready**, **🟡 AI model missing** or **🔴 AI offline**. After a scan, a banner states whether the narrative came from the model or the deterministic fallback. Without a running SLM the tool still works fully and the PDF is still generated.
 
-> Without a running SLM, the tool still works fully; the AI section falls back to a deterministic summary — and the PDF is still generated.
+### AI Output Verification (Grounding)
 
-### 🔍 AI Output Verification (Grounding)
+Every structured AI claim is verified against the actual scan findings before it reaches the report:
 
-Every AI-generated structured claim (top findings and technical remediation) is **verified against the actual scan findings** before it reaches the report:
+- The SLM must return a `finding_id` copied verbatim from the scan findings.
+- `verification.py` matches the claim to a real finding (exact ID → exact title → fuzzy title ≥ 85%).
+- **Ungrounded claims are dropped**; severity mismatches are corrected to the scan value.
+- Numeric severity claims in the executive summary are checked against real counts.
+- PDF/JSON/HTML/SARIF carry a provenance stamp: scan ID, finding count and a SHA-256 digest of the findings.
 
-- Each AI claim carries a `finding_id` copied verbatim from the scan's findings.
-- `verification.py` matches the claim to a real finding (exact `finding_id` → exact normalized title → fuzzy title 85%+ similarity).
-- **Ungrounded claims are automatically dropped** from the report.
-- **Severity mismatches are corrected** to the scan's values.
-- Numeric severity claims in the executive summary are checked against the real finding counts.
-- The report (PDF/JSON/HTML) carries a provenance stamp: scan ID, finding count, and a SHA-256 digest of the findings.
+This keeps the structured report data traceable to SmartVAPT's own results.
 
-This makes the structured report data **traceable to SmartVAPT's own scan results**.
+---
 
-### 🛡️ Provider-Aware Scan Guardrails
+## 🛡️ Provider-Aware Scan Guardrails
 
 `infrastructure_mapper.py` turns the hosting lookup into scan behaviour:
 
 | Detected provider | Behaviour |
 |---|---|
-| **CDN / WAF** (Cloudflare, Akamai, CloudFront, Fastly, Imperva, Sucuri, …) | **Passive mode** — network/Nuclei/directory/sensitive-path/API active checks are skipped to avoid WAF bans and to stop treating edge IPs as the client's origin. Passive web headers, TLS, DNS and subdomain recon still run |
-| **Shared hosting** (GoDaddy, HostGator, Bluehost, Hostinger, …) | **Throttled mode** — Nuclei rate ≤ 5 req/s, gobuster ≤ 3 threads, request delays, plus a shared-tenant warning in the report |
-| **PaaS / serverless** (Vercel, Netlify, Heroku, Render, Fly.io, …) | OS/kernel CVE scanning is disabled; app/API checks stay enabled |
-| **Cloud** (AWS, Azure, GCP, DigitalOcean, Linode, …) | Standard mode plus cloud-specific focus (object storage, IMDS, IAM, ingress) |
-| **Unknown / ISP / private** | Standard mode (still rate-bounded) |
+| **CDN / WAF** — Cloudflare, Akamai edge, CloudFront, Fastly, Imperva, Sucuri, Azure Front Door, … | **Passive mode.** Network/Nuclei/directory/sensitive-path/API active checks are skipped to avoid WAF bans and to stop treating edge IPs as the client origin. Web headers, TLS, DNS and subdomain recon still run |
+| **Shared hosting** — GoDaddy, HostGator, Bluehost, Hostinger, Namecheap, … | **Throttled mode.** Nuclei ≤ 5 req/s, gobuster ≤ 3 threads, request delays, plus a shared-tenant legal warning |
+| **PaaS / serverless** — Vercel, Netlify, Heroku, Render, Fly.io, GitHub Pages, … | OS/kernel CVE scanning is disabled; application and API checks stay enabled |
+| **Cloud** — AWS, Azure, GCP, DigitalOcean, Linode, Vultr, Hetzner, … | Standard mode plus cloud-specific focus (object storage, IMDS, IAM, ingress) |
+| **Unknown / ISP / private** | Standard mode with bounded rates |
 
-The mapper also collects public **RDAP abuse contacts**, the target's **`security.txt`**, and **candidate pivot prefixes** (resolved /24s plus BGPView ASN prefixes). Pivots are **never scanned automatically** — they are suggestions that require separate written authorization.
+The mapper also collects public **RDAP abuse contacts**, the target's **`security.txt`** and **candidate pivot prefixes** (resolved /24s or /48s, plus BGPView ASN prefixes). Pivots are **suggestions only** — SmartVAPT never scans them automatically.
 
-A sidebar checkbox can override the guardrails for an explicitly authorized CDN/shared-host test. The override still keeps concurrency and request rates low, and the report records that the override was used.
+A sidebar checkbox can **override the guardrails** for an explicitly authorized CDN/shared-host test. The override keeps concurrency and request rates low, and the report records that it was used.
 
-### 🧭 Compliance Mapping (OWASP / NIST / PCI-DSS)
+---
 
-Every finding is mapped deterministically (never guessed by the SLM) to:
+## 🧭 Compliance Mapping (OWASP / NIST / PCI-DSS)
 
-- **OWASP Top 10 (2021)** — including API Security hints used by the API scanner;
-- **NIST CSF** controls (e.g., `PR.AC-4`, `DE.CM-8`);
-- **PCI-DSS** requirements (v3.2.1 numbering; validate v4.0 with a QSA).
+Every finding is mapped deterministically — never guessed by the SLM — to:
 
-The dashboard's **Provider & Compliance** tab and PDF **Section M** show an exposure index (0–100), risk band, per-framework control counts and a C-level narrative. Mappings are indicative and do not constitute a formal audit opinion.
+- **OWASP Top 10 (2021)**, including API Security hints from the API scanner
+- **NIST CSF** controls (e.g. `PR.AC-4`, `DE.CM-8`)
+- **PCI-DSS** requirements (v3.2.1 numbering; validate v4.0 with a QSA)
 
-### 🔁 Verify Fix (Per-Finding Re-Test)
+The **Provider & Compliance** tab and PDF **Section M** show an exposure index (0–100), risk band, per-framework control counts and a C-level narrative. Mappings support remediation planning but are **not a formal audit opinion**.
 
-**All Findings → Verify Fix** re-runs a single read-only check for the selected finding after remediation, without repeating the scan. Results are cached per scan and show one of four states:
+---
+
+## 🔁 Verify Fix (Per-Finding Re-Test)
+
+**All Findings → Verify Fix** re-runs one read-only check for a selected finding after remediation, without repeating the scan:
 
 | State | Meaning |
 |---|---|
 | ✅ **Fixed** | The issue is no longer observable (header present, path blocked, port closed, SPF/DMARC published, TLS 1.2+, …) |
 | ❌ **Still present** | The issue is still observable |
 | ⚠️ **Inconclusive** | The target answered but a definitive verdict was impossible (e.g. soft-404, generic Nuclei finding) |
-| ⏭️ **Skipped** | Passive/CDN guardrails are active or the finding type has no safe single-request check |
+| ⏭️ **Skipped** | Passive/CDN guardrails are active, or no safe single-request check exists |
 
-Sensitive-file checks validate the response body signature (`.env` assignments, `.git/config`, `PRIVATE KEY`, archive magic bytes) so a soft-404 page is reported as inconclusive rather than a false positive. Verify Fix also respects provider guardrails and uses the same optional authentication headers as the scan.
+Sensitive-file checks validate body signatures (`.env` assignments, `.git/config`, `PRIVATE KEY`, archive magic bytes), so a soft-404 page is reported as inconclusive rather than a false positive. Verify Fix respects provider guardrails and reuses the scan's optional authentication headers. Results are cached per scan and remain available in the **Last scan** view.
 
-### 🎛️ Finding Filters (Sidebar)
+---
 
-- **Severity filter** — show only critical/high/medium/low/info in the report and findings list.
-- **Vector filter** — show only network/web/dns/api/recon attack vectors.
-- Applied to the PDF report, findings list, and UI charts.
+## 🎛️ Dashboard Controls
 
-### 📄 Report Section Toggles (Sidebar)
+### Finding filters (sidebar)
+- **Severity filter** — critical/high/medium/low/info
+- **Vector filter** — network/web/dns/api/recon
+- Applied consistently to the findings list, charts, AI prompt, compliance summary and PDF.
 
+### Report section toggles (sidebar)
 - Executive summary / Top findings / Pen-test details & exploitation options / Technical remediation / Appendix
-- Each section can be independently enabled/disabled.
-- Toggle settings are passed to `generate_report()` and respected in the PDF.
+- Each section can be independently enabled or disabled.
 
-### �rack Remediation Tracker (Sidebar)
+### Remediation tracker (sidebar)
+- Mark each finding `pending` or `fixed`; choices persist across scans via `st.session_state`.
+- Shows `Fixed: X · Pending: Y` to track remediation progress.
 
-- Persistent per-scan tracker: mark each finding as `pending` or `fixed`.
-- Uses `st.session_state` so choices survive across scans.
-- Summary shows `Fixed: X · Pending: Y`.
-- Helps track progress across multiple assessment runs.
-
-### 🔎 Data Verification Summary in UI
-
-In the main dashboard, after a scan the AI verification status is displayed:
-
-```
-✅ AI data verification: VERIFIED — all structured AI claims match this scan — 12/12 structured claims matched this scan · findings digest `a1b2c3d4…`
-```
-
-### 🛠️ Setup for Local SLM
-
-```bash
-# one-time
-ollama serve                          # start the server
-ollama pull phi3:mini                 # pull the model
-
-# run app
-streamlit run main.py
-```
-
-Optional overrides:
-```bash
-export SLM_MODEL="gemma2:2b"
-export SLM_PROVIDER="openai"
-export SLM_BASE_URL="http://localhost:1234"
-```
-> To use an OpenAI-compatible local server instead (LM Studio, vLLM, ...), set `SLM_PROVIDER=openai` and `SLM_BASE_URL` accordingly.
-
-### 🔎 AI output verification (grounding)
-
-Every AI-generated structured claim is verified against the actual scan findings before it reaches the report:
-
-- The local SLM is asked to return a `finding_id` copied verbatim from the scan's findings.
-- `verification.py` matches each AI claim to a real finding (exact id → exact title → fuzzy title).
-- Claims that cannot be matched are **dropped**; severity mismatches are **corrected** to the scan value.
-- Numeric severity claims in the executive summary are checked against the real counts.
-- The report (PDF/JSON/HTML) carries a provenance stamp: scan ID, finding count, and a SHA-256 digest of the findings.
-
-This makes the structured report data traceable to SmartVAPT's own scan results.
+### Baseline / diff mode
+- Save the current scan as a baseline and compare later runs to highlight new and fixed findings.
 
 ---
 
 ## 📦 Requirements
 
-- **Kali Linux / Debian / Ubuntu** (recommended; works on any Linux/macOS)
+- **Kali Linux / Debian / Ubuntu** (recommended; works on other Linux/macOS and Windows)
 - Python **3.10+**
 - System tools:
+
 ```bash
 sudo apt update
-sudo apt install -y nmap gobuster dnsutils libpango-1.0-0 \
-    libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 fonts-dejavu-extra
+sudo apt install -y python3-pip python3-venv nmap gobuster dnsutils \
+    curl fonts-dejavu-core
 ```
-> `gobuster` is optional — the dirb vector degrades gracefully if it's missing.
-> PDF generation uses pure-Python fpdf2; only the DejaVu fonts are needed for proper rendering.
+
+- **Nuclei** is optional but recommended for template scanning:
+  ```bash
+  sudo apt install -y nuclei        # or download from ProjectDiscovery
+  ```
+- PDF generation uses pure-Python `fpdf2`; DejaVu fonts are required for proper glyph rendering.
+
+> Debian/Kali now mark the system Python as **externally managed (PEP 668)**. Install Python packages inside the project virtualenv — do not use `pip install --break-system-packages`.
 
 ---
 
 ## 🚀 Installation
 
-### Option A — One-command installer
+### Option A — Installer (recommended)
+
 ```bash
-git clone https://github.com/lichenvarghese-cyber/SmartVAPT.git
-cd SmartVAPT
+git clone https://github.com/lichenvarghese-cyber/SmartVAPT-team-3.git
+cd SmartVAPT-team-3
 chmod +x install.sh
 ./install.sh
 ```
-`install.sh` creates a virtual environment, installs Python dependencies, and sets up Nmap capabilities.
+
+`install.sh` installs system tools, creates `venv/`, installs `requirements.txt`, sets Nmap capabilities and adds a `smartvapt` alias.
 
 ### Option B — Manual
+
 ```bash
-git clone https://github.com/lichenvarghese-cyber/SmartVAPT.git
-cd SmartVAPT
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/lichenvarghese-cyber/SmartVAPT-team-3.git
+cd SmartVAPT-team-3
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip wheel setuptools
 pip install -r requirements.txt
+```
+
+If `python3 -m venv` fails, install the venv package first:
+
+```bash
+sudo apt install -y python3-venv python3-pip
+```
+
+### Windows / macOS
+
+The Streamlit app and scanners are cross-platform; system tools (Nmap, gobuster, Nuclei) must be installed separately and available on `PATH`. Then:
+
+```bash
+python -m venv venv
+# Windows: venv\Scripts\activate
+source venv/bin/activate
+pip install -r requirements.txt
+python -m streamlit run main.py
 ```
 
 ---
@@ -223,67 +233,126 @@ pip install -r requirements.txt
 ## ▶️ How to Run
 
 ```bash
-source .venv/bin/activate      # if using the venv
+cd ~/SmartVAPT-team-3
+source venv/bin/activate
 streamlit run main.py
 ```
-Then open **http://localhost:8501** in your browser.
+
+Open **http://localhost:8501**. With the installer alias:
+
+```bash
+source ~/.bashrc
+smartvapt
+```
 
 ### Using the dashboard
-1. Enter a **Target** (IP, domain, or URL).
-2. Toggle the scan vectors you want:
+
+1. Enter a **Target** (IP, domain or URL).
+2. Choose the core vectors:
    - ☑ Network Scan (Nmap + vulners)
    - ☑ Web App Audit (headers + dirs)
    - ☑ DNS / Email Security (SPF + DMARC)
-3. Set the **port range** (default `1-1000`).
-4. Click **Run SmartVAPT Scan**.
-5. Review live progress, the findings table, and download the **PDF report**.
+3. Leave **IP Geolocation & Hosting Lookup** and **Provider-aware safety guardrails** enabled (default).
+4. Choose the port preset (default: the 1000 most-used ports).
+5. Optionally enable **Nuclei**, **Subdomain enum**, **API security checks**, baseline mode or authenticated headers.
+6. Click **Run SmartVAPT Scan**.
+7. Review the seven tabs: **Network, Web, DNS, Recon / API, All Findings, Location, Provider & Compliance**.
+8. Use **All Findings → Verify Fix** after remediation, and download the PDF/JSON/HTML/SARIF exports.
 
-### Enable AI narratives (optional, local SLM)
+### Scan time
+
+| Setup | Typical |
+|---|---|
+| CDN/WAF passive | 20–60 s |
+| Quick (top 100 ports, web, DNS, no Nuclei/subdomains/API) | 1–3 min |
+| Default (top 1000 + web + DNS + Nuclei) | 5–15 min |
+| Full (adds subdomains + API) | 10–25 min |
+
+The loading page shows a live ETA and learns per-target timings in `eta_history.json`.
+
+### Headless mode
+
 ```bash
-ollama pull phi3:mini            # one-time; requires Ollama installed
-ollama serve                     # keep running in the background
-streamlit run main.py
+python run_headless_scan.py <target> [options]
 ```
-Without a running SLM the tool still works fully — the AI section falls back to a deterministic summary.
+
+| Option | Effect |
+|---|---|
+| `--ports top100 / 1-1000 / 22,80,443` | Port selection |
+| `--no-network` | Skip Nmap |
+| `--no-web` | Skip the web audit |
+| `--no-dns` | Skip SPF/DMARC |
+| `--no-nuclei` | Skip Nuclei |
+| `--no-geo` | Skip geolocation/provider classification |
+| `--subdomains` | Enable subdomain enumeration |
+| `--api` | Enable API checks |
+| `--force-active` | Override provider guardrails (authorized targets only) |
+
+Examples:
+
+```bash
+python run_headless_scan.py scanme.nmap.org --no-network --no-nuclei
+python run_headless_scan.py cloudflare.com --no-network --no-nuclei
+```
+
+### Tests
+
+```bash
+source venv/bin/activate
+python -m pytest -q
+```
+
+Current suite: **90 tests** covering finding normalization, scoring, verification, provider guardrails, compliance mapping, PDF sections L/M and Verify Fix.
 
 ---
 
 ## 🗂️ Project Structure
 
 ```
-SmartVAPT/
-├── main.py              # Streamlit dashboard / orchestrator
-├── config.py            # API key, model, report branding
-├── network_scanner.py   # Nmap + vulners wrapper
-├── web_scanner.py       # Web header/TLS/dir checks + DNS scanner
-├── infrastructure_mapper.py # Provider classification, abuse contacts, pivots, guardrails
-├── compliance_mapper.py # OWASP Top 10 / NIST CSF / PCI-DSS mapping + exposure summary
-├── verify_fix.py        # Per-finding read-only re-test ("Verify Fix")
-├── ai_engine.py         # Local SLM-powered narrative generation + MITRE ATT&CK mapping
-├── verification.py      # AI claim grounding + SHA-256 provenance stamp + MITRE ATT&CK support
-├── findings.py          # Finding dataclass + severity normalization
-├── scoring.py           # CVSS scoring, severity, remediation playbooks, compliance enrichment
-├── report_gen.py        # fpdf2 PDF report generator (conditional sections + MITRE/L/M summaries)
-├── exporters.py         # JSON/HTML/SARIF export + verification records
-├── evidence.py          # Per-scan raw evidence store
+SmartVAPT-team-3/
+├── main.py                    # Streamlit dashboard / orchestrator
+├── run_headless_scan.py       # Streamlit-free scan pipeline
+├── config.py                  # SLM endpoint/model and report branding
+├── network_scanner.py         # Nmap + vulners wrapper
+├── web_scanner.py             # Web header/TLS/dir checks + DNS scanner
+├── nuclei_scanner.py          # Nuclei template wrapper
+├── subdomain_scanner.py       # crt.sh + DNS brute force + takeover check
+├── api_scanner.py             # Swagger/GraphQL/JWT/rate-limit checks
+├── geo_locator.py             # IP geolocation and hosting lookup
+├── infrastructure_mapper.py   # Provider guardrails, abuse contacts, pivots
+├── compliance_mapper.py       # OWASP/NIST/PCI mapping + exposure summary
+├── verify_fix.py              # Per-finding read-only re-test
+├── eta_estimator.py           # Live ETA + per-target timing history
+├── command_tracker.py         # Background command status
+├── portsets.py                # Port preset definitions
+├── ai_engine.py               # Local SLM narrative + MITRE ATT&CK mapping
+├── verification.py            # AI claim grounding + SHA-256 provenance
+├── findings.py                # Finding dataclass + severity normalization
+├── scoring.py                 # CVSS, playbooks, compliance enrichment
+├── smartvapt_fixes.py         # Ubuntu CVE validation helpers
+├── report_gen.py              # PDF report (Sections A–M)
+├── exporters.py               # JSON/HTML/SARIF export
+├── evidence.py                # Per-scan raw evidence store
 ├── requirements.txt
-├── install.sh           # Automated setup script
-└── evidence/<scan_id>/  # Raw tool output for every scan
+├── install.sh                 # Automated Kali setup
+├── tests/                     # 90 pytest tests
+└── evidence/<scan_id>/        # Raw tool output for every scan
 ```
 
 ---
 
 ## 🛡️ Merits / Why SmartVAPT
 
-- **Tri-vector coverage in one pass** — network, web, and email/DNS posture assessed together instead of stitching 3–4 separate tools.
-- **Evidence-first design** — every finding is backed by raw tool output saved under `evidence/<scan_id>/`, making reports auditable and reproducible (a core VAPT deliverable requirement).
-- **Professional PDF reporting** — branded, severity-ranked reports ready to hand to clients, not just console dumps.
-- **Privacy-preserving AI report generation** — a local small language model (SLM) via Ollama produces executive summaries, per-finding impact analysis, and prioritized remediation roadmaps. **All scan data stays on the machine** — no API keys, no third-party egress.
-- **MITRE ATT&CK framework integration** — every AI-generated structured claim is mapped to standard MITRE ATT&CK technique IDs (e.g., T1059, T1190, T1110). The report carries a summary table (Section K) counting findings per technique, and each finding/remediation line displays its assigned technique.
-- **AI output verification & provenance** — every structured AI claim is matched against the actual scan findings before it reaches the report. Ungrounded claims are dropped; severity mismatches are corrected. The report embeds a SHA-256 digest of the findings and a verification record (`verified`, `grounded_claims`, `data_sha256`, `summary_contradictions`) so the output can be audited independently.
-- **Beginner-friendly, pro-useful** — one-click Streamlit UI ideal for students learning VAPT methodology, while the modular Python backend can be scripted or extended.
-- **Graceful degradation** — missing optional tools (gobuster, API keys) never crash the scan; affected vectors are clearly reported.
-- **Free & open source** — built entirely on open tooling (Nmap, gobuster, dig) plus a local SLM (Ollama). No ongoing API costs.
+- **Tri-vector coverage in one pass** — network, web and email/DNS posture assessed together instead of stitching several tools.
+- **Provider-aware safety** — passive mode for CDN/WAF, throttling for shared hosting, PaaS-aware scope and abuse/security contacts, so the tool does not blindly hammer third-party infrastructure.
+- **Compliance-ready reporting** — deterministic OWASP Top 10, NIST CSF and PCI-DSS mappings with an exposure index and C-level narrative, not AI-invented references.
+- **Evidence-first design** — every finding is backed by raw output under `evidence/<scan_id>/`, making reports auditable and reproducible.
+- **Closed-loop remediation** — Verify Fix re-tests individual findings and reports fixed / still present / inconclusive.
+- **Privacy-preserving AI** — local SLM via Ollama; no API keys and no scan-data egress. Deterministic fallback keeps reports working offline.
+- **AI output verification** — every structured claim is matched to a real finding; ungrounded claims are dropped and a SHA-256 digest is embedded.
+- **Professional PDF reporting** — severity-ranked, branded reports including MITRE ATT&CK (Section K), infrastructure/guardrails (L) and compliance (M).
+- **Graceful degradation** — missing Nuclei, gobuster, Ollama or API access never crashes a scan; affected vectors are reported clearly.
+- **Beginner-friendly, pro-useful** — one-click Streamlit workflow with a modular Python backend that can be scripted or extended.
 
 ---
 
@@ -291,11 +360,16 @@ SmartVAPT/
 
 | Symptom | Fix |
 |---|---|
-| PDF renders with missing glyphs | Ensure DejaVu fonts are installed (`fonts-dejavu-core`); the generator also falls back to system fonts on Windows/macOS |
-| PDF text/font errors | `sudo apt install fonts-dejavu-core` |
-| Nmap results empty on ports <1024 | Run as root, or give Nmap raw-socket caps: `sudo setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)` |
-| Sidebar shows **🔴 AI offline** / fallback summary used | Install and start Ollama, then pull a model: `curl -fsSL https://ollama.com/install.sh \| sh`, `ollama pull phi3:mini`; verify with `curl http://localhost:11434/api/tags` and click **Re-check AI engine** |
-| gobuster step skipped | `sudo apt install gobuster` (optional) |
+| `error: externally-managed-environment` | Use the project venv: `python3 -m venv venv && source venv/bin/activate` (never `--break-system-packages`) |
+| `streamlit: command not found` | Activate the venv first: `source venv/bin/activate`, then `streamlit run main.py` |
+| `python3 -m venv` fails | `sudo apt install -y python3-venv python3-pip` |
+| PDF renders with missing glyphs | `sudo apt install fonts-dejavu-core` |
+| Nmap results empty on privileged ports | Run as root or `sudo setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)` |
+| Sidebar shows **🔴 AI offline** | Install/start Ollama, pull a model (`ollama pull phi3:mini`), verify `curl http://localhost:11434/api/tags`, click **Re-check AI engine** |
+| Nuclei skipped | `sudo apt install nuclei` or download from ProjectDiscovery — the scan continues without it |
+| gobuster step skipped | `sudo apt install gobuster` |
+| Active checks skipped / **Passive mode** banner | Target is behind a CDN/WAF. Test the authorized origin, or enable the guardrail override only with written authorization |
+| Verify Fix shows **Skipped** | Passive guardrails are active, or the finding type has no safe single-request check |
 
 ---
 
