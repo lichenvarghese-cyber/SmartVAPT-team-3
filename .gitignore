@@ -5,3 +5,12 @@ __pycache__/
 # Dependencies
 venv/
 .venv/
+
+# Generated scan artifacts (reports, exports, raw evidence)
+SmartVAPT_*.pdf
+SmartVAPT_*.html
+SmartVAPT_*.sarif
+SmartVAPT_*.json
+results_*.json
+baseline.json
+evidence/*/

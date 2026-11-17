@@ -1,6 +1,6 @@
 # 🛡️ SmartVAPT — Tri-Vector Attack Surface Analyzer & AI Reporting Engine
 
-SmartVAPT is an automated Vulnerability Assessment & Penetration Testing (VAPT) tool with a Streamlit dashboard. It combines **three scan vectors** — network, web application, and DNS/email security — into a single workflow and produces a professional, evidence-backed **PDF report**, optionally enriched with **AI-generated narratives** via Google Gemini.
+SmartVAPT is an automated Vulnerability Assessment & Penetration Testing (VAPT) tool with a Streamlit dashboard. It combines **three scan vectors** — network, web application, and DNS/email security — into a single workflow and produces a professional, evidence-backed **PDF report**, optionally enriched with **AI-generated narratives** from a **local small language model (Ollama)** — no cloud API keys and no scan data leaving the machine.
 
 Built as part of the **ICT Academy of Kerala – Cyber Security Analyst (VAPT)** program.
 
@@ -64,7 +64,9 @@ The PDF report can be automatically enriched with an **executive summary, per-fi
    ```
 5. Download the PDF — AI narratives are embedded per finding and in the executive summary.
 
-> Without a running SLM, the tool still works fully; the AI section falls back to a deterministic summary.
+> The sidebar shows a live badge: **🟢 AI ready**, **🟡 AI model missing**, or **🔴 AI offline**. Click it to see the endpoint, pick an installed model, or copy the setup commands. After a scan, a banner tells you whether the narrative really came from the model or from the deterministic fallback.
+
+> Without a running SLM, the tool still works fully; the AI section falls back to a deterministic summary — and the PDF is still generated.
 
 ### 🔍 AI Output Verification (Grounding)
 
@@ -219,7 +221,6 @@ SmartVAPT/
 ├── report_gen.py        # fpdf2 PDF report generator (conditional sections + MITRE summary)
 ├── exporters.py         # JSON/HTML/SARIF export + verification records
 ├── evidence.py          # Per-scan raw evidence store
-├── report_gen.py        # fpdf2 PDF report generator
 ├── requirements.txt
 ├── install.sh           # Automated setup script
 └── evidence/<scan_id>/  # Raw tool output for every scan
@@ -245,10 +246,10 @@ SmartVAPT/
 
 | Symptom | Fix |
 |---|---|
-| PDF renders with missing glyphs | Ensure DejaVu fonts are installed (`fonts-dejavu-core`) |
-| PDF text/font errors | `sudo apt install fonts-dejavu-extra` |
+| PDF renders with missing glyphs | Ensure DejaVu fonts are installed (`fonts-dejavu-core`); the generator also falls back to system fonts on Windows/macOS |
+| PDF text/font errors | `sudo apt install fonts-dejavu-core` |
 | Nmap results empty on ports <1024 | Run as root, or give Nmap raw-socket caps: `sudo setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)` |
-| "SLM unavailable" / fallback summary used | Ensure Ollama is running (`ollama serve`) and the model is pulled (`ollama pull phi3:mini`); check `SLM_MODEL`/`SLM_BASE_URL` |
+| Sidebar shows **🔴 AI offline** / fallback summary used | Install and start Ollama, then pull a model: `curl -fsSL https://ollama.com/install.sh \| sh`, `ollama pull phi3:mini`; verify with `curl http://localhost:11434/api/tags` and click **Re-check AI engine** |
 | gobuster step skipped | `sudo apt install gobuster` (optional) |
 
 ---

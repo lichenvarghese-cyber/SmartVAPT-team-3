@@ -5,9 +5,10 @@ import pandas as pd
 import streamlit as st
 
 import exporters
-from ai_engine import AIEngine
+from ai_engine import AIEngine, check_engine
 from api_scanner import APIScanner
 from command_tracker import tracker
+from config import SLM_BASE_URL, SLM_MODEL, SLM_PROVIDER
 from eta_estimator import ScanEta, fmt_eta
 from evidence import EvidenceStore, new_scan_id
 from findings import FindingSet
@@ -25,8 +26,64 @@ st.title("SmartVAPT")
 st.caption("Tri-Vector Attack Surface Analyzer & AI Reporting Engine")
 st.markdown("---")
 
+# Model used for this run's AI narrative (the sidebar can override it).
+slm_choice = SLM_MODEL
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _slm_status(provider: str, base_url: str, model: str) -> dict:
+    """Cached (30s) reachability probe for the local SLM endpoint."""
+    return check_engine(provider=provider, base_url=base_url, model=model)
+
+
 with st.sidebar:
     st.header("Scan Configuration")
+    # --- AI engine status (local SLM) ---
+    _status = _slm_status(SLM_PROVIDER, SLM_BASE_URL, SLM_MODEL)
+    if _status.get("reachable") and _status.get("model_installed"):
+        _badge = "🟢 AI ready"
+    elif _status.get("reachable"):
+        _badge = "🟡 AI model missing"
+    else:
+        _badge = "🔴 AI offline"
+    with st.expander(f"{_badge} — AI report engine",
+                     expanded=not _status.get("reachable")):
+        st.caption(f"Provider: `{_status['provider']}` · "
+                   f"Endpoint: `{_status['base_url']}`")
+        if _status.get("reachable"):
+            _models = _status.get("models") or []
+            if _models:
+                _prev = st.session_state.get("slm_model")
+                if _prev in _models:
+                    _idx = _models.index(_prev)
+                elif SLM_MODEL in _models:
+                    _idx = _models.index(SLM_MODEL)
+                else:
+                    _idx = 0
+                slm_choice = st.selectbox(
+                    "Model", _models, index=_idx,
+                    help="Local model used to write the AI narrative. "
+                         "Runs on this machine; scan data never leaves it.")
+                st.session_state["slm_model"] = slm_choice
+            else:
+                st.warning("The server is running but no models are installed.")
+                st.code("ollama pull phi3:mini", language="bash")
+            if _models and not _status.get("model_installed"):
+                st.info(f"Configured model `{SLM_MODEL}` is not installed — "
+                        f"using `{slm_choice}`.")
+            if _models:
+                st.caption("Prompts and findings stay on this host.")
+        else:
+            st.error("Not running — reports fall back to a deterministic "
+                     "summary instead of an AI narrative.")
+            st.caption(f"`{_status.get('error')}`")
+            st.code("curl -fsSL https://ollama.com/install.sh | sh\n"
+                    "ollama serve   # or: sudo systemctl start ollama\n"
+                    "ollama pull phi3:mini", language="bash")
+        if st.button("Re-check AI engine", key="slm_recheck",
+                     use_container_width=True):
+            _slm_status.clear()
+            st.rerun()
     target = st.text_input("Target (IP / domain / URL)", value="scanme.nmap.org")
     scan_network = st.checkbox("Network Scan (Nmap + vulners)", value=True)
     scan_web = st.checkbox("Web App Audit (headers + dirs)", value=True)
@@ -78,11 +135,11 @@ with st.sidebar:
     # --- New: finding filters ---
     with st.expander("Filter findings"):
         filter_severity = st.multiselect("Severity", ["critical", "high", "medium", "low", "info"],
-                                         default=["critical", "high", "medium"],
-                                         help="Show only these severities in the report and findings list")
+                                         default=["critical", "high", "medium", "low", "info"],
+                                         help="Show only these severities in the report and findings list (leave empty to keep all)")
         filter_vector = st.multiselect("Vector", ["network", "web", "dns", "api", "recon"],
-                                       default=["network", "web", "dns"],
-                                       help="Show only these attack vectors")
+                                       default=["network", "web", "dns", "api", "recon"],
+                                       help="Show only these attack vectors (leave empty to keep all)")
     # --- New: report section toggles ---
     with st.expander("Report sections"):
         include_exec_summary = st.checkbox("Executive summary", value=True)
@@ -578,8 +635,9 @@ if run:
     # Deterministic CVSS normalization + remediation playbooks first, so the
     # report is complete even when the AI is unavailable.
     enriched = enrich_findings(findings.to_dict_list())
+    engine = None
     try:
-        engine = AIEngine()
+        engine = AIEngine(model=slm_choice)
         ai_result = engine.analyze(enriched, results)
     except Exception as e:
         ai_result = {
@@ -668,6 +726,20 @@ if run:
                                 f"(planned ~{planned})")
     st.success(f"Scan completed for {target} in {total_elapsed:.0f}s — "
                f"{len(findings)} findings")
+
+    # Make it explicit whether this report's narrative really came from the
+    # local model or from the deterministic fallback.
+    _ai_error = getattr(engine, "last_error", None)
+    if engine is not None and not _ai_error:
+        st.success(f"🤖 AI narrative generated locally with `{engine.model}` — "
+                   "all prompts stayed on this machine.")
+    else:
+        st.warning(
+            "🤖 AI narrative unavailable — this report uses the deterministic "
+            "fallback summary."
+            + (f" Reason: {_ai_error}." if _ai_error else "")
+            + " Open **AI report engine (local SLM)** in the sidebar for setup."
+        )
 
     # ----------------------------------------------------------------
     # RISK SUMMARY DASHBOARD

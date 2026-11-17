@@ -43,7 +43,8 @@ def main():
         else:
             rest.append(args[i])
             i += 1
-    opts = {a.lower() for a in rest}
+    # Strip leading dashes so ``--no-network`` matches ``no-network``.
+    opts = {a.lower().lstrip("-") for a in rest}
     scan_nuclei = "no-nuclei" not in opts
     scan_network = "no-network" not in opts
     scan_web = "no-web" not in opts
@@ -59,6 +60,13 @@ def main():
     findings = FindingSet()
     results = {"target": target, "scan_id": scan_id}
 
+    # Derived once: web and subdomain steps need these even when the network
+    # or DNS scan is disabled (previously raised NameError with
+    # --no-network / --no-dns).
+    net_target = (target.replace("http://", "").replace("https://", "")
+                  .split("/")[0].split(":")[0])
+    domain = net_target
+
     if "no-geo" not in opts:
         print("[*] IP Geolocation & Hosting Lookup...")
         try:
@@ -70,8 +78,6 @@ def main():
 
     if scan_network:
         print("[*] Network scan (nmap + vulners)...")
-        net_target = (target.replace("http://", "").replace("https://", "")
-                      .split("/")[0].split(":")[0])
         try:
             ns = NetworkScanner(net_target, evidence=evidence)
             net_result = ns.scan(ports=ports, os_detect=False, progress_cb=log)
@@ -121,8 +127,6 @@ def main():
 
     if scan_dns:
         print("[*] DNS / email security (SPF/DMARC)...")
-        domain = (target.replace("http://", "").replace("https://", "")
-                  .split("/")[0].split(":")[0])
         try:
             ds = DNSScanner(domain, evidence=evidence)
             dns_result = ds.check_email_security()

@@ -72,3 +72,28 @@ def test_fuzzy_title_match():
     result = verification.apply_verification(_findings(), ai, scan_id="S1")
     assert result["top_findings"][0]["finding_id"] == "NET-001"
     assert result["verification"]["verified"] is True
+
+
+def test_mitre_fallback_is_attached_to_grounded_claims():
+    ai = {
+        "top_findings": [
+            {"finding_id": "NET-001", "title": "OpenSSH CVE",
+             "severity": "critical"},
+        ],
+        "technical_remediation": [],
+        "executive_summary": "",
+    }
+    result = verification.apply_verification(_findings(), ai, scan_id="S1")
+    assert result["top_findings"][0]["mitre_attack"] == "T1021.004"
+
+
+def test_malformed_ai_items_are_dropped_without_crashing():
+    ai = {
+        "top_findings": ["not an object", 42],
+        "technical_remediation": None,
+        "executive_summary": "",
+    }
+    result = verification.apply_verification(_findings(), ai, scan_id="S1")
+    assert result["top_findings"] == []
+    assert result["technical_remediation"] == []
+    assert result["verification"]["unmatched_claims"] == 2

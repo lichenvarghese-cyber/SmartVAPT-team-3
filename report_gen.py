@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timezone
 
 from fpdf import FPDF
@@ -8,32 +9,44 @@ from portsets import describe_ports
 
 DEJAVU_DIR = "/usr/share/fonts/truetype/dejavu"
 
+# Font directories tried in order (Linux/Kali, bundled repo fonts, Windows,
+# macOS, user fonts). The first existing file for each style wins.
+_FONT_DIRS = [
+    DEJAVU_DIR,
+    "/usr/share/fonts/dejavu",
+    "/usr/share/fonts/TTF",
+    "/usr/local/share/fonts",
+    os.path.expanduser("~/.fonts"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts"),
+    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
+    "/Library/Fonts",
+    "/System/Library/Fonts",
+    "/System/Library/Fonts/Supplemental",
+]
+
+# Candidate file names per style. DejaVu is preferred (full Unicode coverage);
+# the others keep PDF generation working on Windows/macOS and minimal Linux
+# images that do not ship DejaVu.
+_FONT_FILES = {
+    "reg": ["DejaVuSans.ttf", "DejaVuSerif.ttf", "LiberationSans-Regular.ttf",
+            "arial.ttf", "Arial.ttf", "segoeui.ttf", "NotoSans-Regular.ttf"],
+    "bold": ["DejaVuSans-Bold.ttf", "DejaVuSerif-Bold.ttf",
+             "LiberationSans-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf",
+             "segoeuib.ttf", "NotoSans-Bold.ttf"],
+    "italic": ["DejaVuSans-Oblique.ttf", "DejaVuSans.ttf", "DejaVuSerif.ttf",
+               "LiberationSans-Italic.ttf", "ariali.ttf", "segoeuii.ttf"],
+    "mono": ["DejaVuSansMono.ttf", "DejaVuSans.ttf", "DejaVuSerif.ttf",
+             "LiberationMono-Regular.ttf", "consola.ttf", "cour.ttf",
+             "NotoSansMono-Regular.ttf"],
+}
+
 # Candidate paths per style, tried in order — first existing file wins.
 # Some minimal images ship DejaVu without the Oblique/Italic faces, so each
-# style falls back to whatever DejaVu variant is available.
+# style falls back to whatever variant is available.
 _FONT_CANDIDATES = {
-    "reg": [
-        os.path.join(DEJAVU_DIR, "DejaVuSans.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSerif.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSansMono.ttf"),
-    ],
-    "bold": [
-        os.path.join(DEJAVU_DIR, "DejaVuSans-Bold.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSans.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSerif-Bold.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSansMono-Bold.ttf"),
-    ],
-    "italic": [
-        os.path.join(DEJAVU_DIR, "DejaVuSans-Oblique.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSans.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSerif.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSansMono.ttf"),
-    ],
-    "mono": [
-        os.path.join(DEJAVU_DIR, "DejaVuSansMono.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSans.ttf"),
-        os.path.join(DEJAVU_DIR, "DejaVuSerif.ttf"),
-    ],
+    style: [os.path.join(folder, name)
+            for folder in _FONT_DIRS for name in names]
+    for style, names in _FONT_FILES.items()
 }
 
 
@@ -59,8 +72,9 @@ def _register_fonts(pdf):
     mono = _find_font(_FONT_CANDIDATES["mono"]) or reg
     if not reg:
         raise RuntimeError(
-            f"No DejaVu TrueType fonts found in {DEJAVU_DIR}; "
-            "install the 'fonts-dejavu-core' package.")
+            "No usable TrueType font found. On Kali/Debian run: "
+            "sudo apt install fonts-dejavu-core — or place DejaVuSans.ttf "
+            "in the repository's fonts/ directory.")
     pdf.add_font("DejaVu", "", reg)
     pdf.add_font("DejaVu", "B", bold)
     pdf.add_font("DejaVu", "I", italic)
@@ -103,6 +117,30 @@ def _clean_text(text) -> str:
     return s
 
 
+def _as_dicts(items) -> list[dict]:
+    """Return only well-formed objects from an AI-provided list."""
+    if isinstance(items, dict):
+        return [items]
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _mitre_values(value) -> list[str]:
+    """Normalize an AI/finding ``mitre_attack`` value into technique IDs.
+
+    The prompt allows either ``"T1190"`` or ``["T1190", "T1059"]``; both must
+    be accepted because the value is used as a dict key in Section K.
+    """
+    if isinstance(value, str):
+        parts = re.split(r"[,;/|]", value)
+    elif isinstance(value, (list, tuple, set)):
+        parts = [str(part) for part in value]
+    else:
+        parts = [str(value)] if value else []
+    return [part.strip() for part in parts if part and part.strip()]
+
+
 def _safe_multi(pdf, text, line_h=5, size=10, font="DejaVu", style=""):
     """multi_cell with cursor reset — prevents 'not enough horizontal space'."""
     pdf.set_font(font, style, size)
@@ -118,6 +156,25 @@ def generate_report(scan_data: dict, ai_result: dict,
                     include_pentest_details: bool = True,
                     include_tech_remediation: bool = True,
                     include_appendix: bool = True):
+    # Normalize the AI output so malformed model responses can never crash
+    # PDF generation (small models sometimes return strings/lists/missing keys).
+    ai_result = dict(ai_result) if isinstance(ai_result, dict) else {}
+    ai_result["top_findings"] = _as_dicts(ai_result.get("top_findings"))
+    ai_result["technical_remediation"] = _as_dicts(ai_result.get("technical_remediation"))
+    if not isinstance(ai_result.get("verification"), dict):
+        ai_result["verification"] = {}
+    # Small models often return a single string where the schema asks for a
+    # list. Never iterate a string character-by-character in the PDF.
+    for item in ai_result["technical_remediation"]:
+        for key in ("steps", "commands"):
+            value = item.get(key)
+            if isinstance(value, str):
+                item[key] = [value]
+            elif not isinstance(value, list):
+                item[key] = []
+            else:
+                item[key] = [str(v) for v in value if v is not None]
+
     pdf = PDFReport()
     _register_fonts(pdf)
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -136,9 +193,10 @@ def generate_report(scan_data: dict, ai_result: dict,
     pdf.cell(0, 8, f"Date: {datetime.now(timezone.utc).astimezone():%B %d, %Y}", ln=True, align="C")
     verification = ai_result.get("verification") or {}
     if verification:
+        sha = str(verification.get("data_sha256") or "N/A")[:16]
         stamp = (f"Scan ID: {verification.get('scan_id') or scan_data.get('scan_id', 'N/A')}   "
-                 f"Data SHA-256: {verification.get('data_sha256', 'N/A')[:16]}...   "
-                 f"Verification: {verification.get('status', 'unknown').upper()}")
+                 f"Data SHA-256: {sha}...   "
+                 f"Verification: {str(verification.get('status') or 'unknown').upper()}")
         pdf.set_font("DejaVu", "I", 8)
         pdf.set_text_color(90, 90, 90)
         pdf.set_x(pdf.l_margin)
@@ -153,7 +211,7 @@ def generate_report(scan_data: dict, ai_result: dict,
         pdf.cell(0, 10, "1. Executive Summary", ln=True)
         pdf.ln(1)
         pdf.set_text_color(30, 30, 30)
-        _safe_multi(pdf, ai_result.get("executive_summary", "No summary available."),
+        _safe_multi(pdf, ai_result.get("executive_summary") or "No summary available.",
                     line_h=6, size=11)
         pdf.ln(4)
 
@@ -185,16 +243,16 @@ def generate_report(scan_data: dict, ai_result: dict,
             pdf.multi_cell(0, 6, _clean_text(f"{i}. {f.get('title', 'Finding')}  "
                                              f"[{f.get('severity', 'N/A')}]"))
             pdf.set_text_color(30, 30, 30)
-            # MITRE ATT&CK column
-            mitre = f.get("mitre_attack") or "—"
+            # MITRE ATT&CK column (accepts "T1190" or ["T1190", "T1059"])
+            mitre = ", ".join(_mitre_values(f.get("mitre_attack"))) or "—"
             pdf.set_font("DejaVu", "B", 9)
             pdf.set_text_color(0, 0, 139)
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(0, 5, _clean_text(f"MITRE ATT&CK: {mitre}"))
             pdf.set_text_color(30, 30, 30)
-            _safe_multi(pdf, f"Business Impact: {f.get('business_impact', 'N/A')}",
+            _safe_multi(pdf, f"Business Impact: {f.get('business_impact') or 'N/A'}",
                         line_h=5, size=10)
-            _safe_multi(pdf, f"Remediation: {f.get('remediation', 'N/A')}",
+            _safe_multi(pdf, f"Remediation: {f.get('remediation') or 'N/A'}",
                         line_h=5, size=10)
             pdf.ln(2)
 
@@ -225,15 +283,15 @@ def generate_report(scan_data: dict, ai_result: dict,
             pdf.set_text_color(30, 30, 30)
             pdf.set_x(pdf.l_margin)
             # MITRE ATT&CK tag
-            mitre = t.get("mitre_attack") or "—"
+            mitre = ", ".join(_mitre_values(t.get("mitre_attack"))) or "—"
             pdf.set_font("DejaVu", "B", 9)
             pdf.set_text_color(0, 0, 139)
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(0, 5, _clean_text(f"MITRE ATT&CK: {mitre}"))
             pdf.set_text_color(30, 30, 30)
             pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(0, 6, _clean_text(f"{i}. {t.get('finding', 'Finding')}  "
-                                             f"({t.get('owasp', 'N/A')})"))
+            pdf.multi_cell(0, 6, _clean_text(f"{i}. {t.get('finding') or 'Finding'}  "
+                                             f"({t.get('owasp') or 'N/A'})"))
             for step in t.get("steps", []):
                 _safe_multi(pdf, f"  - {step}", line_h=5, size=10)
             if t.get("commands"):
@@ -251,13 +309,12 @@ def generate_report(scan_data: dict, ai_result: dict,
         pdf.set_x(pdf.l_margin)
         pdf.cell(0, 10, "5. Appendix: Scan Details", ln=True)
         pdf.ln(2)
-        _render_appendix(pdf, scan_data)
+        _render_appendix(pdf, scan_data, ai_result)
 
     # ---------- K. MITRE ATT&CK Technique Summary ----------
     mitre_counts: dict[str, int] = {}
     for f in (ai_result.get("top_findings") or []) + (ai_result.get("technical_remediation") or []):
-        mitre = f.get("mitre_attack")
-        if mitre:
+        for mitre in _mitre_values(f.get("mitre_attack")):
             mitre_counts[mitre] = mitre_counts.get(mitre, 0) + 1
     if mitre_counts:
         pdf.set_font("DejaVu", "B", 10)
@@ -394,7 +451,7 @@ def _render_pentest_details(pdf, scan_data: dict):
              "full list.")
 
 
-def _render_appendix(pdf, scan_data: dict):
+def _render_appendix(pdf, scan_data: dict, ai_result: dict | None = None):
     def h2(text):
         pdf.ln(3)
         pdf.set_font("DejaVu", "B", 12)
@@ -671,21 +728,22 @@ def _render_appendix(pdf, scan_data: dict):
             pdf.ln(1)
 
     # ---------- Data verification / provenance ----------
-    verification = ai_result.get("verification") or {}
+    verification = ai_result.get("verification") if isinstance(ai_result, dict) else {}
+    if not isinstance(verification, dict):
+        verification = {}
     if verification:
         h2("J. Data Verification & Provenance")
-        status = str(verification.get("status", "unknown")).upper()
         verdict = "VERIFIED — all structured AI claims match this scan" if \
             verification.get("verified") else \
             "NOT VERIFIED — see unmatched claims below"
         kv("Scan ID", verification.get("scan_id") or scan_data.get("scan_id", "N/A"))
         kv("Findings in scan", verification.get("finding_count"))
-        kv("Findings digest (SHA-256)", verification.get("data_sha256", "N/A"))
+        kv("Findings digest (SHA-256)", verification.get("data_sha256") or "N/A")
         kv("Structured AI claims", verification.get("structured_claims"))
         kv("Grounded claims", verification.get("grounded_claims"))
         kv("Unmatched claims (dropped)", verification.get("unmatched_claims"))
         kv("Verification status", verdict)
-        kv("Verified at", verification.get("verified_at", "N/A"))
+        kv("Verified at", verification.get("verified_at") or "N/A")
         contradictions = verification.get("summary_contradictions") or []
         if contradictions:
             body("Executive-summary numeric contradictions (corrected/flagged):")
@@ -695,14 +753,16 @@ def _render_appendix(pdf, scan_data: dict):
         else:
             body("Executive-summary numeric claims were consistent with the "
                  "scan's finding counts.")
-        unmatched = [c for c in (verification.get("top_findings", [])
-                                 + verification.get("technical_remediation", []))
-                     if not c.get("grounded")]
+        unmatched = [c for c in ((verification.get("top_findings") or [])
+                                 + (verification.get("technical_remediation") or []))
+                     if isinstance(c, dict) and not c.get("grounded")]
         if unmatched:
             body("Ungrounded AI claims removed from the report:")
             for c in unmatched:
                 item = c.get("input") or {}
+                if not isinstance(item, dict):
+                    item = {}
                 body(f"  - {item.get('title') or item.get('finding') or 'unnamed'}: "
                      f"{c.get('reason')}")
-        body(verification.get("note", ""))
+        body(verification.get("note") or "")
 

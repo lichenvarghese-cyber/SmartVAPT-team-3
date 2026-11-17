@@ -25,31 +25,56 @@ from typing import Any
 
 SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
-# Minimal MITRE ATT&CK mapping for common SmartVAPT findings.
-# Keys are lower-cased token(s) that appear in a finding title/description;
-# values are the most relevant technique IDs (can be a list or a single string).
-MITRE_ATTACK_MAP: dict[str, str | list[str]] = {
-    # Network/SSH
-    "openssh": "T1595",          # Active Directory Certificate Services - not exact but common placeholder
-    "ssh": "T1021",             # Remote Services: SSH
-    "nmap": "T1046",            # Network Service Scanning
-    "vulners": "T1068",         # Exploitation for Privilege Escalation
-    # Web
-    "xss": "T1059.006",         # Command Obfuscation: JavaScript
-    "sql injection": "T1190",   # Exploit Public-Facing Application: SQL Injection
-    "directory traversal": "T1055",  # Path Traversal
-    "open redirect": "T1008",   # Exploitation of Remote Services
-    "csrf": "T1027",            # Cross-Site Request Forgery
-    # Auth/Brute force
-    "brute force": "T1110",     # Brute Force
-    "credential stuffing": "T1110",
-    # DNS/E-mail
-    "spf": "T1552",             # Unsecured Credentials: SPF
-    "dmarc": "T1552",
-    # Subdomain/takeover
-    "takeover": "T1615",        # Server-Side Request Forgery? Actually T1615 is CDN Cache Poisoning; use T1059 for generic
-    "subdomain": "T1039",       # DNS Cache Snooping? Actually T1043 for DNS; T1039 is Data Stealing; keep generic
+# MITRE ATT&CK mapping for common SmartVAPT findings. Keys are lower-cased
+# tokens matched against a finding's title/description; values are the most
+# relevant Enterprise technique IDs (ATT&CK v15). Used as a deterministic
+# fallback when the local model does not return a technique for a finding.
+MITRE_ATTACK_MAP: dict[str, str] = {
+    # Discovery / scanning
+    "nmap": "T1046",                 # Network Service Discovery
+    "port scan": "T1046",
+    "vulners": "T1595.002",          # Active Scanning: Vulnerability Scanning
+    # Remote access / services
+    "openssh": "T1021.004",          # Remote Services: SSH
+    "ssh": "T1021.004",
+    "rdp": "T1021.001",              # Remote Services: RDP
+    "smb": "T1021.002",              # Remote Services: SMB/Windows Admin Shares
+    # Web application
+    "sql injection": "T1190",        # Exploit Public-Facing Application
+    "xss": "T1059.007",              # Command and Scripting Interpreter: JavaScript
+    "cross-site scripting": "T1059.007",
+    "directory traversal": "T1083",  # File and Directory Discovery
+    "path traversal": "T1083",
+    "open redirect": "T1566.002",    # Phishing: Spearphishing Link
+    "csrf": "T1190",                 # Exploit Public-Facing Application
+    "ssrf": "T1190",
+    "command injection": "T1059",    # Command and Scripting Interpreter
+    "rce": "T1190",
+    "file upload": "T1105",          # Ingress Tool Transfer
+    # Credentials
+    "brute force": "T1110",          # Brute Force
+    "credential stuffing": "T1110.004",
+    "default credential": "T1078.001",  # Valid Accounts: Default Accounts
+    "weak password": "T1110.001",
+    # DNS / e-mail
+    "spf": "T1566",                  # Phishing (spoofed sender)
+    "dmarc": "T1656",                # Impersonation
+    "dkim": "T1656",
+    "zone transfer": "T1590.002",    # Gather Victim Network Info: DNS
+    "subdomain takeover": "T1584.001",  # Compromise Infrastructure: Domains
+    "takeover": "T1584.001",
+    "subdomain": "T1590.002",
 }
+
+
+def mitre_for(finding: dict[str, Any]) -> str | None:
+    """Deterministically pick a MITRE ATT&CK technique for a finding."""
+    haystack = " ".join(str(finding.get(k, "")) for k in
+                        ("title", "description", "evidence")).lower()
+    for token, technique in MITRE_ATTACK_MAP.items():
+        if re.search(rf"\b{re.escape(token)}\b", haystack):
+            return technique
+    return None
 
 
 def findings_digest(findings: list[dict[str, Any]]) -> str:
@@ -102,6 +127,13 @@ def _match_finding(item: dict[str, Any], findings: list[dict[str, Any]],
 
 
 def _verify_item(item: dict[str, Any], findings, by_id, by_title) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {
+            "input": item,
+            "grounded": False,
+            "status": "unmatched",
+            "reason": "Malformed AI claim (not a JSON object); dropped.",
+        }
     matched, method = _match_finding(item, findings, by_id, by_title)
     if matched is None:
         return {
@@ -114,9 +146,10 @@ def _verify_item(item: dict[str, Any], findings, by_id, by_title) -> dict[str, A
     severity = str(item.get("severity") or "").lower()
     matched_severity = str(matched.get("severity") or "").lower()
     severity_corrected = bool(severity and severity != matched_severity)
-    # Preserve MITRE ATT&CK technique from the matched finding when the AI
-    # claim was grounded to that finding.
-    mitre = matched.get("mitre_attack") or item.get("mitre_attack")
+    # Preserve the AI-chosen technique when present, otherwise derive one
+    # deterministically from the grounded finding.
+    mitre = (matched.get("mitre_attack") or item.get("mitre_attack")
+             or mitre_for(matched))
 
     return {
         "input": item,
@@ -166,6 +199,8 @@ def verify_ai_result(findings: list[dict[str, Any]], ai_result: dict[str, Any],
     Returns a verification record. The report generator and JSON/HTML
     exporters embed this record so the output can be audited.
     """
+    if not isinstance(ai_result, dict):
+        ai_result = {}
     by_id, by_title = _finding_index(findings)
     top_checks = [_verify_item(item, findings, by_id, by_title)
                   for item in (ai_result.get("top_findings") or [])]
@@ -212,8 +247,8 @@ def apply_verification(findings: list[dict[str, Any]], ai_result: dict[str, Any]
 
     The verification record is attached under ``ai_result['verification']``.
     """
-    result = dict(ai_result)
-    verification = verify_ai_result(findings, ai_result, scan_id=scan_id)
+    result = dict(ai_result) if isinstance(ai_result, dict) else {}
+    verification = verify_ai_result(findings, result, scan_id=scan_id)
 
     def _clean(items):
         out = []
@@ -228,6 +263,8 @@ def apply_verification(findings: list[dict[str, Any]], ai_result: dict[str, Any]
                     item["severity"] = matched.get("severity", item.get("severity"))
                 item["finding_id"] = matched_id
                 item["title"] = matched.get("title", item.get("title", ""))
+                if check.get("mitre_attack"):
+                    item["mitre_attack"] = check["mitre_attack"]
             out.append(item)
         return out
 

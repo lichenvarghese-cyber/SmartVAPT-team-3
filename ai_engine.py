@@ -9,12 +9,54 @@ Supported providers:
   - "openai":   any OpenAI-compatible chat endpoint (LM Studio, vLLM, ...)
 """
 import json
-import os
 from typing import Any
 
 import requests
 
 from config import SLM_BASE_URL, SLM_MODEL, SLM_PROVIDER, SLM_TIMEOUT
+
+
+def check_engine(provider: str | None = None, base_url: str | None = None,
+                 model: str | None = None, timeout: float = 2.0) -> dict[str, Any]:
+    """Probe the configured local SLM endpoint and report what is available.
+
+    Never raises: connection failures are returned in the ``error`` field so
+    the UI can show setup instructions instead of crashing.
+    """
+    provider = (provider or SLM_PROVIDER or "ollama").lower()
+    base_url = (base_url or SLM_BASE_URL).rstrip("/")
+    model = model or SLM_MODEL
+    out: dict[str, Any] = {
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "reachable": False,
+        "model_installed": False,
+        "models": [],
+        "error": None,
+    }
+    try:
+        if provider == "openai":
+            r = requests.get(f"{base_url}/v1/models", timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            models = [str(m.get("id")) for m in (data.get("data") or [])
+                      if m.get("id")]
+        else:
+            r = requests.get(f"{base_url}/api/tags", timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            models = [str(m.get("name")) for m in (data.get("models") or [])
+                      if m.get("name")]
+        out["models"] = sorted(models)
+        out["reachable"] = True
+        out["model_installed"] = any(
+            m == model or m == f"{model}:latest" or model == f"{m}:latest"
+            for m in models
+        )
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
 
 SYSTEM_PROMPT = """You are a Senior Penetration Tester and CISO advisor.
 You will receive raw vulnerability data from an automated VAPT scan covering:
@@ -58,6 +100,9 @@ class AIEngine:
         self.model = model or SLM_MODEL
         self.base_url = (base_url or SLM_BASE_URL).rstrip("/")
         self.timeout = timeout or SLM_TIMEOUT
+        # Populated by analyze(); lets the UI explain whether the narrative
+        # actually came from the model or from the deterministic fallback.
+        self.last_error: str | None = None
 
     # ------------------------------------------------------------------ call
     def _call_ollama(self, prompt: str) -> str:
@@ -98,15 +143,39 @@ class AIEngine:
 
     # ---------------------------------------------------------------- analyze
     def analyze(self, findings: list, scan_summary: dict) -> dict:
+        self.last_error = None
         prompt = self._build_prompt(findings, scan_summary)
         try:
             text = self._call(prompt)
             if text.startswith("```"):
                 text = text.split("```", 2)[1]
                 text = text.removeprefix("json").strip()
-            return json.loads(text)
+            parsed = json.loads(text)
+            if not isinstance(parsed, dict):
+                raise ValueError("model output was not a JSON object")
+            for key, default in (
+                ("executive_summary", ""),
+                ("overall_risk", "Unknown"),
+                ("risk_score", 0),
+                ("top_findings", []),
+                ("technical_remediation", []),
+                ("conclusion", ""),
+            ):
+                parsed.setdefault(key, default)
+            # Small models occasionally return a bare string (or a dict where
+            # a list is expected). Keep only well-formed objects so the
+            # verifier and PDF generator cannot crash on malformed output.
+            for key in ("top_findings", "technical_remediation"):
+                items = parsed.get(key)
+                if isinstance(items, dict):
+                    items = [items]
+                if not isinstance(items, list):
+                    items = []
+                parsed[key] = [item for item in items if isinstance(item, dict)]
+            return parsed
         except json.JSONDecodeError:
             # The model answered but not with clean JSON; keep its text.
+            self.last_error = "model returned non-JSON output"
             return {
                 "executive_summary": text if "text" in locals() else "",
                 "overall_risk": "Unknown",
@@ -116,6 +185,7 @@ class AIEngine:
                 "conclusion": "Local SLM returned a non-JSON response.",
             }
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             fallback = self._fallback_summary(findings)
             fallback["conclusion"] = (
                 f"Note: local SLM analysis unavailable ({type(e).__name__}: {e}). "
