@@ -22,6 +22,7 @@ from report_gen import generate_report
 from scoring import enrich_findings
 from subdomain_scanner import SubdomainScanner
 from verification import apply_verification
+from verify_fix import verify_fix
 from web_scanner import DNSScanner, WebScanner, parse_auth_headers
 
 st.set_page_config(page_title="SmartVAPT", page_icon="SHIELD", layout="wide")
@@ -29,8 +30,79 @@ st.title("SmartVAPT")
 st.caption("Tri-Vector Attack Surface Analyzer & AI Reporting Engine")
 st.markdown("---")
 
+
+def _ingest_findings(finding_set, items):
+    """Add scanner findings to the FindingSet.
+
+    Scanners are inconsistent: some return ``Finding`` dataclasses (DNS, TLS,
+    Nuclei) and some return already-serialized dicts (network, API). Accept
+    both instead of silently dropping the dataclass ones.
+    """
+    from findings import Finding
+    for item in items or []:
+        try:
+            if isinstance(item, Finding):
+                finding_set.add(item)
+            elif isinstance(item, dict):
+                finding_set.add(Finding(**{
+                    k: v for k, v in item.items()
+                    if k in Finding.__dataclass_fields__}))
+            else:
+                finding_set.add(item)
+        except Exception as fe:
+            st.warning(f"Skipped malformed finding: {fe}")
+
 # Model used for this run's AI narrative (the sidebar can override it).
 slm_choice = SLM_MODEL
+
+
+@st.fragment
+def _verify_fix_panel(findings_list, scan_target, guardrails, auth_headers,
+                      scan_id):
+    """Fragment: per-finding Verify Fix. Only this panel reruns on click, so
+    the scan results around it stay on screen."""
+    findings_list = [f for f in (findings_list or []) if isinstance(f, dict)]
+    if not findings_list:
+        st.caption("No findings available to re-test.")
+        return
+    store_key = f"fix_verification_{scan_id}"
+    outcomes = st.session_state.setdefault(store_key, {})
+    labels = [f"{f.get('id', '?')} — {str(f.get('title', ''))[:80]}"
+              for f in findings_list]
+    chosen = st.selectbox("Finding to re-test", labels,
+                          key=f"verify_fix_select_{scan_id}")
+    index = labels.index(chosen) if chosen in labels else 0
+    finding = findings_list[index]
+    finding_id = str(finding.get("id", ""))
+
+    if st.button("🔁 Re-run check", key=f"verify_fix_button_{scan_id}",
+                 use_container_width=True):
+        with st.spinner("Re-running a single read-only check..."):
+            outcomes[finding_id] = verify_fix(
+                finding, scan_target=scan_target,
+                guardrails=guardrails or {},
+                auth_headers=auth_headers or {})
+        last = st.session_state.get("last_results") or {}
+        last["fix_verification"] = list(outcomes.values())
+        st.session_state["last_results"] = last
+
+    outcome = outcomes.get(finding_id)
+    if not outcome:
+        st.caption("Run the check to compare the current state with the "
+                   "original finding. Requests are read-only and bounded.")
+        return
+    icons = {"fixed": "✅", "still_present": "❌",
+             "inconclusive": "⚠️", "skipped": "⏭️"}
+    status = str(outcome.get("status", "inconclusive"))
+    icon = icons.get(status, "⚠️")
+    st.markdown(f"{icon} **{status.replace('_', ' ').title()}** — "
+                f"{outcome.get('detail', '')}")
+    st.caption(f"Check `{outcome.get('check', '?')}` · "
+               f"{outcome.get('duration_ms', 0)} ms · "
+               f"{outcome.get('checked_at', '')}")
+    if outcome.get("observed"):
+        with st.expander("Observed data"):
+            st.json(outcome["observed"])
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -482,15 +554,7 @@ if run:
             # Record the exact port selection for the report ("top1000" or a
             # literal range like "1-1000").
             results["ports_requested"] = ports
-            from findings import Finding
-            for f in net_result.get("findings", []):
-                try:
-                    findings.add(Finding(**{
-                        k: v for k, v in f.items()
-                        if k in Finding.__dataclass_fields__
-                    }))
-                except Exception as fe:
-                    st.warning(f"Skipped malformed finding: {fe}")
+            _ingest_findings(findings, net_result.get("findings", []))
         except (ScanStopped, RuntimeError) as e:
             # ScanStopped -> user stop via progress callback;
             # RuntimeError("Scan stopped by user") -> raised by the scanner
@@ -560,17 +624,12 @@ if run:
             }
             results["web"] = web_result
             results["web_audited_url"] = ws.target
-            from findings import Finding
+            # Always sync port/service metadata with nmap -sV observations
+            # so every web finding carries the accurate port/service.
             for key in ("headers", "directories", "tls",
                         "robots_sitemap", "sensitive_paths", "redirects"):
-                for f in web_result.get(key, {}).get("findings", []):
-                    try:
-                        findings.add(Finding(**{
-                            k: v for k, v in f.items()
-                            if k in Finding.__dataclass_fields__
-                        }))
-                    except Exception as fe:
-                        st.warning(f"Skipped malformed finding: {fe}")
+                _ingest_findings(findings,
+                                 web_result.get(key, {}).get("findings", []))
         except (ScanStopped, RuntimeError) as e:
             if isinstance(e, ScanStopped) or "stopped" in str(e).lower():
                 scan_stopped = True
@@ -595,15 +654,7 @@ if run:
             ds = DNSScanner(domain, evidence=evidence)
             dns_result = ds.check_email_security()
             results["dns"] = dns_result
-            from findings import Finding
-            for f in dns_result.get("findings", []):
-                try:
-                    findings.add(Finding(**{
-                        k: v for k, v in f.items()
-                        if k in Finding.__dataclass_fields__
-                    }))
-                except Exception as fe:
-                    st.warning(f"Skipped malformed finding: {fe}")
+            _ingest_findings(findings, dns_result.get("findings", []))
         except Exception as e:
             results["dns"] = {"error": str(e)}
         step_done("DNS / email security")
@@ -633,15 +684,7 @@ if run:
                                 auth_headers=auth_headers)
             nuc_result = nsc.scan(progress_cb=run_cb, stop_flag=ctrl)
             results["nuclei"] = nuc_result
-            from findings import Finding
-            for f in nuc_result.get("findings", []):
-                try:
-                    findings.add(Finding(**{
-                        k: v for k, v in f.items()
-                        if k in Finding.__dataclass_fields__
-                    }))
-                except Exception as fe:
-                    st.warning(f"Skipped malformed finding: {fe}")
+            _ingest_findings(findings, nuc_result.get("findings", []))
             if not nuc_result.get("available"):
                 st.info(f"Nuclei skipped — {nuc_result.get('error','unavailable')}")
         except (ScanStopped, RuntimeError) as e:
@@ -669,15 +712,7 @@ if run:
             ssc = SubdomainScanner(domain, evidence=evidence)
             sub_result = ssc.enumerate(progress_cb=run_cb, stop_flag=ctrl)
             results["subdomains"] = sub_result
-            from findings import Finding
-            for f in sub_result.get("findings", []):
-                try:
-                    findings.add(Finding(**{
-                        k: v for k, v in f.items()
-                        if k in Finding.__dataclass_fields__
-                    }))
-                except Exception as fe:
-                    st.warning(f"Skipped malformed finding: {fe}")
+            _ingest_findings(findings, sub_result.get("findings", []))
         except (ScanStopped, RuntimeError) as e:
             if isinstance(e, ScanStopped) or "stopped" in str(e).lower():
                 scan_stopped = True
@@ -706,15 +741,7 @@ if run:
             asc = APIScanner(target, evidence=evidence, auth_headers=auth_headers)
             api_result = asc.run_all(progress_cb=run_cb, stop_flag=ctrl)
             results["api"] = api_result
-            from findings import Finding
-            for f in api_result.get("findings", []):
-                try:
-                    findings.add(Finding(**{
-                        k: v for k, v in f.items()
-                        if k in Finding.__dataclass_fields__
-                    }))
-                except Exception as fe:
-                    st.warning(f"Skipped malformed finding: {fe}")
+            _ingest_findings(findings, api_result.get("findings", []))
         except (ScanStopped, RuntimeError) as e:
             if isinstance(e, ScanStopped) or "stopped" in str(e).lower():
                 scan_stopped = True
@@ -1118,6 +1145,13 @@ if run:
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True,
                          hide_index=True)
+            st.markdown("#### 🔁 Verify Fix")
+            st.caption("Re-test one finding after remediation without "
+                       "re-running the whole scan. Checks are read-only and "
+                       "respect the provider guardrails.")
+            _verify_fix_panel(all_findings, target,
+                              results.get("guardrails") or {},
+                              auth_headers, scan_id)
             with st.expander("Remediation playbooks"):
                 for f in all_findings[:30]:
                     steps = f.get("remediation_steps") or []
@@ -1343,6 +1377,7 @@ if run:
     st.session_state["last_results"] = results
     st.session_state["last_ai_result"] = ai_result
     st.session_state["last_pdf_path"] = pdf_path
+    st.session_state["last_auth_headers"] = auth_headers
 
 else:
     last = st.session_state.get("last_results")
@@ -1379,6 +1414,14 @@ else:
         if rows_last:
             st.dataframe(pd.DataFrame(rows_last), use_container_width=True,
                          hide_index=True)
+        st.markdown("#### 🔁 Verify Fix")
+        st.caption("Re-test a finding from the last scan after applying "
+                   "remediation. Checks are read-only and respect the "
+                   "provider guardrails.")
+        _verify_fix_panel(findings_last, last.get("target", ""),
+                          last.get("guardrails") or {},
+                          st.session_state.get("last_auth_headers") or {},
+                          last.get("scan_id", ""))
         last_pdf = st.session_state.get("last_pdf_path")
         if last_pdf and os.path.exists(last_pdf):
             with open(last_pdf, "rb") as fh:

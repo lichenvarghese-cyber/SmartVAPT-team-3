@@ -32,6 +32,7 @@ The developers accept no liability for misuse and criminal proceedings may be in
 | **Data Verification** | `verification.py` | Matches every structured AI claim to a scan finding, drops ungrounded claims, and stamps the report with a SHA-256 findings digest |
 | **Provider Guardrails** | `infrastructure_mapper.py` | Classifies CDN/WAF, cloud, PaaS, shared hosting, ISP and private addresses; switches to passive/throttled mode, throttles Nuclei/gobuster, and records abuse/security contacts and suggested pivots |
 | **Compliance Mapping** | `compliance_mapper.py` | Deterministic OWASP Top 10 (2021), NIST CSF and PCI-DSS mapping per finding, with an exposure index and C-level summary (Section M) |
+| **Verify Fix** | `verify_fix.py` | Per-finding, read-only re-test (headers, sensitive files, TLS, SPF/DMARC, ports, GraphQL, HTTP methods, redirects, API docs) that reports fixed / still present / inconclusive |
 
 ### Sample output from a real run (`scanme.nmap.org`)
 
@@ -108,6 +109,19 @@ Every finding is mapped deterministically (never guessed by the SLM) to:
 - **PCI-DSS** requirements (v3.2.1 numbering; validate v4.0 with a QSA).
 
 The dashboard's **Provider & Compliance** tab and PDF **Section M** show an exposure index (0–100), risk band, per-framework control counts and a C-level narrative. Mappings are indicative and do not constitute a formal audit opinion.
+
+### 🔁 Verify Fix (Per-Finding Re-Test)
+
+**All Findings → Verify Fix** re-runs a single read-only check for the selected finding after remediation, without repeating the scan. Results are cached per scan and show one of four states:
+
+| State | Meaning |
+|---|---|
+| ✅ **Fixed** | The issue is no longer observable (header present, path blocked, port closed, SPF/DMARC published, TLS 1.2+, …) |
+| ❌ **Still present** | The issue is still observable |
+| ⚠️ **Inconclusive** | The target answered but a definitive verdict was impossible (e.g. soft-404, generic Nuclei finding) |
+| ⏭️ **Skipped** | Passive/CDN guardrails are active or the finding type has no safe single-request check |
+
+Sensitive-file checks validate the response body signature (`.env` assignments, `.git/config`, `PRIVATE KEY`, archive magic bytes) so a soft-404 page is reported as inconclusive rather than a false positive. Verify Fix also respects provider guardrails and uses the same optional authentication headers as the scan.
 
 ### 🎛️ Finding Filters (Sidebar)
 
@@ -244,6 +258,7 @@ SmartVAPT/
 ├── web_scanner.py       # Web header/TLS/dir checks + DNS scanner
 ├── infrastructure_mapper.py # Provider classification, abuse contacts, pivots, guardrails
 ├── compliance_mapper.py # OWASP Top 10 / NIST CSF / PCI-DSS mapping + exposure summary
+├── verify_fix.py        # Per-finding read-only re-test ("Verify Fix")
 ├── ai_engine.py         # Local SLM-powered narrative generation + MITRE ATT&CK mapping
 ├── verification.py      # AI claim grounding + SHA-256 provenance stamp + MITRE ATT&CK support
 ├── findings.py          # Finding dataclass + severity normalization
