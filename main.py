@@ -99,28 +99,45 @@ with st.sidebar:
                  "(session cookies, bearer tokens). Also forwarded to "
                  "gobuster (-c/-H) and nuclei (-H). Do not commit secrets.")
     # --- New: Remediation tracker ---
+    # NOTE: the sidebar is rendered *before* the scan block, so it must never
+    # touch the local `results` variable (it only exists inside `if run:`).
+    # The last scan's findings are persisted in st.session_state after every
+    # scan and read back here, so the tracker also works on a fresh page load.
     with st.expander("Remediation tracker"):
         st.caption("Track which findings have been fixed across scans.")
-        # Initialize session state for the tracker if not present
         if "remediation_tracker" not in st.session_state:
             st.session_state.remediation_tracker = {}  # {finding_id: "fixed"/"pending"}
-        # After a scan, show the current findings and let the user mark them
-        current_ids = [str(f.get("id")) for f in (results.get("findings") or [])]
-        for fid in current_ids:
-            col1, col2 = st.columns([4, 1])
+        last_findings = st.session_state.get("last_findings") or []
+        if not last_findings:
+            st.caption("Run a scan to populate the tracker.")
+        for f in last_findings:
+            fid = str(f.get("id", ""))
+            if not fid:
+                continue
+            sev = str(f.get("severity", "info")).upper()
+            title = str(f.get("title", "Finding"))
+            prev = st.session_state.remediation_tracker.get(fid, "pending")
+            col1, col2 = st.columns([4, 1.2])
             with col1:
-                st.text(fid)
+                st.markdown(f"**[{sev}]** {title}  \n`{fid}`")
             with col2:
                 status = st.selectbox(
-                    "Status", ["pending", "fixed"], index=0,
+                    "Status", ["pending", "fixed"],
+                    index=1 if prev == "fixed" else 0,
                     key=f"track_{fid}",
-                    help="Mark this finding as fixed or still pending")
+                    label_visibility="collapsed",
+                    format_func=str.title,
+                    help=f"Mark '{title}' as fixed or still pending")
             st.session_state.remediation_tracker[fid] = status
-        # Show tracker summary
         if st.session_state.remediation_tracker:
             fixed = sum(1 for s in st.session_state.remediation_tracker.values() if s == "fixed")
             pending = sum(1 for s in st.session_state.remediation_tracker.values() if s == "pending")
             st.caption(f"Fixed: {fixed} · Pending: {pending}")
+            if st.button("Clear tracker", key="clear_remediation_tracker"):
+                for _k in [k for k in st.session_state if str(k).startswith("track_")]:
+                    del st.session_state[_k]
+                st.session_state.remediation_tracker = {}
+                st.rerun()
     run = st.button("Run SmartVAPT Scan", use_container_width=True)
     live_output = st.sidebar.toggle("Live scan output", value=True,
                                     help="Stream nmap/gobuster progress in real time")
@@ -598,10 +615,11 @@ if run:
             filt = [f for f in filt if str(f.get("vector") or "").lower() in fv]
         enriched = filt
     results["findings"] = enriched
-
-    # Merge playbook data into the unified findings list exposed to the UI
-    # and every exporter/appendix.
-    results["findings"] = enriched
+    # Persist the latest findings for the sidebar remediation tracker. The
+    # sidebar renders on the next rerun and reads this from session state.
+    st.session_state.last_findings = enriched
+    st.session_state.last_scan_id = scan_id
+    st.session_state.last_target = target
 
     # ----------------------------------------------------------------
     # 4b) BASELINE / DIFF
@@ -1024,5 +1042,50 @@ if run:
                 use_container_width=True,
             )
 
+    # Persist the finished scan so its summary survives sidebar interactions
+    # (any widget change triggers a rerun where `run` is False).
+    st.session_state["last_results"] = results
+    st.session_state["last_ai_result"] = ai_result
+    st.session_state["last_pdf_path"] = pdf_path
+
 else:
-    st.info("Configure the scan in the sidebar and click Run SmartVAPT Scan.")
+    last = st.session_state.get("last_results")
+    if not last:
+        st.info("Configure the scan in the sidebar and click Run SmartVAPT Scan.")
+    else:
+        findings_last = last.get("findings") or []
+        st.subheader(f"Last scan — {last.get('target', '')}")
+        st.caption(f"Scan ID `{last.get('scan_id', '')}` · "
+                   f"{len(findings_last)} finding(s). Click **Run SmartVAPT Scan** "
+                   "to refresh; these results are kept while you update the sidebar.")
+        counts_last = {k: 0 for k in ("critical", "high", "medium", "low", "info")}
+        for f in findings_last:
+            sev_last = str(f.get("severity", "info")).lower()
+            counts_last[sev_last] = counts_last.get(sev_last, 0) + 1
+        lc1, lc2, lc3, lc4, lc5 = st.columns(5)
+        lc1.metric("Critical", counts_last["critical"])
+        lc2.metric("High", counts_last["high"])
+        lc3.metric("Medium", counts_last["medium"])
+        lc4.metric("Low", counts_last["low"])
+        lc5.metric("Info", counts_last["info"])
+
+        tracker_state = st.session_state.get("remediation_tracker", {})
+        sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        rows_last = [{
+            "ID": f.get("id", ""),
+            "Severity": str(f.get("severity", "")).upper(),
+            "Vector": f.get("vector", ""),
+            "Title": f.get("title", ""),
+            "Target": f.get("target", ""),
+            "Remediation": tracker_state.get(str(f.get("id", "")), "pending").title(),
+        } for f in findings_last]
+        rows_last.sort(key=lambda r: sev_rank.get(r["Severity"].lower(), 5))
+        if rows_last:
+            st.dataframe(pd.DataFrame(rows_last), use_container_width=True,
+                         hide_index=True)
+        last_pdf = st.session_state.get("last_pdf_path")
+        if last_pdf and os.path.exists(last_pdf):
+            with open(last_pdf, "rb") as fh:
+                st.download_button("Download PDF Report", fh,
+                                   file_name=os.path.basename(last_pdf),
+                                   mime="application/pdf")

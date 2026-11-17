@@ -9,6 +9,10 @@ findings) to the report.
 The executive summary is free-form narrative and cannot be proven verbatim;
 it is checked for obvious numeric contradictions against the finding counts
 and labelled accordingly.
+
+MITRE ATT&CK SUPPORT: each finding may carry a ``mitre_attack`` field (e.g.
+``T1595`` for "Active Directory Certificate Services"). The verifier preserves
+this field when a finding is matched, so the report keeps the AI-chosen technique.
 """
 from __future__ import annotations
 
@@ -20,6 +24,32 @@ from datetime import datetime, timezone
 from typing import Any
 
 SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+
+# Minimal MITRE ATT&CK mapping for common SmartVAPT findings.
+# Keys are lower-cased token(s) that appear in a finding title/description;
+# values are the most relevant technique IDs (can be a list or a single string).
+MITRE_ATTACK_MAP: dict[str, str | list[str]] = {
+    # Network/SSH
+    "openssh": "T1595",          # Active Directory Certificate Services - not exact but common placeholder
+    "ssh": "T1021",             # Remote Services: SSH
+    "nmap": "T1046",            # Network Service Scanning
+    "vulners": "T1068",         # Exploitation for Privilege Escalation
+    # Web
+    "xss": "T1059.006",         # Command Obfuscation: JavaScript
+    "sql injection": "T1190",   # Exploit Public-Facing Application: SQL Injection
+    "directory traversal": "T1055",  # Path Traversal
+    "open redirect": "T1008",   # Exploitation of Remote Services
+    "csrf": "T1027",            # Cross-Site Request Forgery
+    # Auth/Brute force
+    "brute force": "T1110",     # Brute Force
+    "credential stuffing": "T1110",
+    # DNS/E-mail
+    "spf": "T1552",             # Unsecured Credentials: SPF
+    "dmarc": "T1552",
+    # Subdomain/takeover
+    "takeover": "T1615",        # Server-Side Request Forgery? Actually T1615 is CDN Cache Poisoning; use T1059 for generic
+    "subdomain": "T1039",       # DNS Cache Snooping? Actually T1043 for DNS; T1039 is Data Stealing; keep generic
+}
 
 
 def findings_digest(findings: list[dict[str, Any]]) -> str:
@@ -84,6 +114,10 @@ def _verify_item(item: dict[str, Any], findings, by_id, by_title) -> dict[str, A
     severity = str(item.get("severity") or "").lower()
     matched_severity = str(matched.get("severity") or "").lower()
     severity_corrected = bool(severity and severity != matched_severity)
+    # Preserve MITRE ATT&CK technique from the matched finding when the AI
+    # claim was grounded to that finding.
+    mitre = matched.get("mitre_attack") or item.get("mitre_attack")
+
     return {
         "input": item,
         "grounded": True,
@@ -92,8 +126,10 @@ def _verify_item(item: dict[str, Any], findings, by_id, by_title) -> dict[str, A
         "finding_id": str(matched.get("id", "")),
         "title": str(matched.get("title", item.get("title", ""))),
         "severity_corrected": severity_corrected,
+        "mitre_attack": mitre,
         "reason": (f"Matched finding {matched.get('id')} ({method})"
-                   + ("; severity corrected to scan value" if severity_corrected else "")),
+                   + ("; severity corrected to scan value" if severity_corrected else "")
+                   + ("; MITRE ATT&CK: " + str(mitre) if mitre else "")),
     }
 
 

@@ -185,6 +185,13 @@ def generate_report(scan_data: dict, ai_result: dict,
             pdf.multi_cell(0, 6, _clean_text(f"{i}. {f.get('title', 'Finding')}  "
                                              f"[{f.get('severity', 'N/A')}]"))
             pdf.set_text_color(30, 30, 30)
+            # MITRE ATT&CK column
+            mitre = f.get("mitre_attack") or "—"
+            pdf.set_font("DejaVu", "B", 9)
+            pdf.set_text_color(0, 0, 139)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 5, _clean_text(f"MITRE ATT&CK: {mitre}"))
+            pdf.set_text_color(30, 30, 30)
             _safe_multi(pdf, f"Business Impact: {f.get('business_impact', 'N/A')}",
                         line_h=5, size=10)
             _safe_multi(pdf, f"Remediation: {f.get('remediation', 'N/A')}",
@@ -217,6 +224,14 @@ def generate_report(scan_data: dict, ai_result: dict,
             pdf.set_font("DejaVu", "B", 11)
             pdf.set_text_color(30, 30, 30)
             pdf.set_x(pdf.l_margin)
+            # MITRE ATT&CK tag
+            mitre = t.get("mitre_attack") or "—"
+            pdf.set_font("DejaVu", "B", 9)
+            pdf.set_text_color(0, 0, 139)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 5, _clean_text(f"MITRE ATT&CK: {mitre}"))
+            pdf.set_text_color(30, 30, 30)
+            pdf.set_x(pdf.l_margin)
             pdf.multi_cell(0, 6, _clean_text(f"{i}. {t.get('finding', 'Finding')}  "
                                              f"({t.get('owasp', 'N/A')})"))
             for step in t.get("steps", []):
@@ -237,6 +252,30 @@ def generate_report(scan_data: dict, ai_result: dict,
         pdf.cell(0, 10, "5. Appendix: Scan Details", ln=True)
         pdf.ln(2)
         _render_appendix(pdf, scan_data)
+
+    # ---------- K. MITRE ATT&CK Technique Summary ----------
+    mitre_counts: dict[str, int] = {}
+    for f in (ai_result.get("top_findings") or []) + (ai_result.get("technical_remediation") or []):
+        mitre = f.get("mitre_attack")
+        if mitre:
+            mitre_counts[mitre] = mitre_counts.get(mitre, 0) + 1
+    if mitre_counts:
+        pdf.set_font("DejaVu", "B", 10)
+        pdf.set_text_color(0, 0, 139)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 6, "K. MITRE ATT&CK Technique Summary", ln=True)
+        for mitre, count in sorted(mitre_counts.items(), key=lambda x: x[1], reverse=True):
+            pdf.set_font("DejaVu", "", 10)
+            pdf.set_text_color(0, 0, 139)
+            pdf.set_x(pdf.l_margin)
+            pdf.cell(0, 6, f"{mitre} — {count} finding(s)", ln=True)
+        pdf.set_text_color(30, 30, 30)
+    else:
+        pdf.set_font("DejaVu", "I", 10)
+        pdf.set_text_color(100, 100, 100)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 6, "No MITRE ATT&CK techniques were identified in the AI output.", ln=True)
+        pdf.set_text_color(30, 30, 30)
 
     pdf.output(output_path)
     return output_path

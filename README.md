@@ -56,6 +56,7 @@ The PDF report can be automatically enriched with an **executive summary, per-fi
    ```bash
    export SLM_MODEL="phi3:mini"
    export SLM_BASE_URL="http://localhost:11434"
+   export SLM_PROVIDER="ollama"
    ```
 4. Launch the dashboard and the AI section runs automatically:
    ```bash
@@ -63,7 +64,65 @@ The PDF report can be automatically enriched with an **executive summary, per-fi
    ```
 5. Download the PDF — AI narratives are embedded per finding and in the executive summary.
 
-> Without a running SLM, the tool still works fully; the AI section is skipped gracefully and a deterministic fallback summary is used.
+> Without a running SLM, the tool still works fully; the AI section falls back to a deterministic summary.
+
+### 🔍 AI Output Verification (Grounding)
+
+Every AI-generated structured claim (top findings and technical remediation) is **verified against the actual scan findings** before it reaches the report:
+
+- Each AI claim carries a `finding_id` copied verbatim from the scan's findings.
+- `verification.py` matches the claim to a real finding (exact `finding_id` → exact normalized title → fuzzy title 85%+ similarity).
+- **Ungrounded claims are automatically dropped** from the report.
+- **Severity mismatches are corrected** to the scan's values.
+- Numeric severity claims in the executive summary are checked against the real finding counts.
+- The report (PDF/JSON/HTML) carries a provenance stamp: scan ID, finding count, and a SHA-256 digest of the findings.
+
+This makes the structured report data **traceable to SmartVAPT's own scan results**.
+
+### 🎛️ Finding Filters (Sidebar)
+
+- **Severity filter** — show only critical/high/medium/low/info in the report and findings list.
+- **Vector filter** — show only network/web/dns/api/recon attack vectors.
+- Applied to the PDF report, findings list, and UI charts.
+
+### 📄 Report Section Toggles (Sidebar)
+
+- Executive summary / Top findings / Pen-test details & exploitation options / Technical remediation / Appendix
+- Each section can be independently enabled/disabled.
+- Toggle settings are passed to `generate_report()` and respected in the PDF.
+
+### �rack Remediation Tracker (Sidebar)
+
+- Persistent per-scan tracker: mark each finding as `pending` or `fixed`.
+- Uses `st.session_state` so choices survive across scans.
+- Summary shows `Fixed: X · Pending: Y`.
+- Helps track progress across multiple assessment runs.
+
+### 🔎 Data Verification Summary in UI
+
+In the main dashboard, after a scan the AI verification status is displayed:
+
+```
+✅ AI data verification: VERIFIED — all structured AI claims match this scan — 12/12 structured claims matched this scan · findings digest `a1b2c3d4…`
+```
+
+### 🛠️ Setup for Local SLM
+
+```bash
+# one-time
+ollama serve                          # start the server
+ollama pull phi3:mini                 # pull the model
+
+# run app
+streamlit run main.py
+```
+
+Optional overrides:
+```bash
+export SLM_MODEL="gemma2:2b"
+export SLM_PROVIDER="openai"
+export SLM_BASE_URL="http://localhost:1234"
+```
 > To use an OpenAI-compatible local server instead (LM Studio, vLLM, ...), set `SLM_PROVIDER=openai` and `SLM_BASE_URL` accordingly.
 
 ### 🔎 AI output verification (grounding)
@@ -153,10 +212,12 @@ SmartVAPT/
 ├── config.py            # API key, model, report branding
 ├── network_scanner.py   # Nmap + vulners wrapper
 ├── web_scanner.py       # Web header/TLS/dir checks + DNS scanner
-├── ai_engine.py         # Local SLM-powered narrative generation
-├── verification.py      # AI claim grounding + SHA-256 provenance stamp
+├── ai_engine.py         # Local SLM-powered narrative generation + MITRE ATT&CK mapping
+├── verification.py      # AI claim grounding + SHA-256 provenance stamp + MITRE ATT&CK support
 ├── findings.py          # Finding dataclass + severity normalization
 ├── scoring.py           # CVSS scoring, severity, remediation playbooks
+├── report_gen.py        # fpdf2 PDF report generator (conditional sections + MITRE summary)
+├── exporters.py         # JSON/HTML/SARIF export + verification records
 ├── evidence.py          # Per-scan raw evidence store
 ├── report_gen.py        # fpdf2 PDF report generator
 ├── requirements.txt
@@ -166,15 +227,17 @@ SmartVAPT/
 
 ---
 
-## ✨ Merits / Why SmartVAPT
+## 🛡️ Merits / Why SmartVAPT
 
 - **Tri-vector coverage in one pass** — network, web, and email/DNS posture assessed together instead of stitching 3–4 separate tools.
 - **Evidence-first design** — every finding is backed by raw tool output saved under `evidence/<scan_id>/`, making reports auditable and reproducible (a core VAPT deliverable requirement).
 - **Professional PDF reporting** — branded, severity-ranked reports ready to hand to clients, not just console dumps.
-- **AI-assisted analysis** — Gemini turns raw findings into executive summaries and prioritized remediation guidance, cutting report-writing time dramatically.
+- **Privacy-preserving AI report generation** — a local small language model (SLM) via Ollama produces executive summaries, per-finding impact analysis, and prioritized remediation roadmaps. **All scan data stays on the machine** — no API keys, no third-party egress.
+- **MITRE ATT&CK framework integration** — every AI-generated structured claim is mapped to standard MITRE ATT&CK technique IDs (e.g., T1059, T1190, T1110). The report carries a summary table (Section K) counting findings per technique, and each finding/remediation line displays its assigned technique.
+- **AI output verification & provenance** — every structured AI claim is matched against the actual scan findings before it reaches the report. Ungrounded claims are dropped; severity mismatches are corrected. The report embeds a SHA-256 digest of the findings and a verification record (`verified`, `grounded_claims`, `data_sha256`, `summary_contradictions`) so the output can be audited independently.
 - **Beginner-friendly, pro-useful** — one-click Streamlit UI ideal for students learning VAPT methodology, while the modular Python backend can be scripted or extended.
 - **Graceful degradation** — missing optional tools (gobuster, API keys) never crash the scan; affected vectors are clearly reported.
-- **Free & open source** — built entirely on open tooling (Nmap, gobuster, dig) plus an optional free-tier Gemini key.
+- **Free & open source** — built entirely on open tooling (Nmap, gobuster, dig) plus a local SLM (Ollama). No ongoing API costs.
 
 ---
 

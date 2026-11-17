@@ -25,6 +25,7 @@ You will receive raw vulnerability data from an automated VAPT scan covering:
 Your job:
 - Correlate findings into business risk.
 - Map issues to OWASP Top 10 where applicable.
+- Map issues to MITRE ATT&CK techniques where applicable.
 - Prioritize by CVSS and exploitability.
 - Produce a concise EXECUTIVE SUMMARY (non-technical) and a TECHNICAL REMEDIATION section with exact commands/config snippets.
 - Use professional language suitable for C-suite.
@@ -35,10 +36,10 @@ Return ONLY valid JSON in this schema:
   "overall_risk": "Critical|High|Medium|Low",
   "risk_score": 0-10,
   "top_findings": [
-    {"finding_id": "exact id from the findings list", "title": "...", "severity": "...", "business_impact": "...", "remediation": "..."}
+    {"finding_id": "exact id from the findings list", "title": "...", "severity": "...", "business_impact": "...", "remediation": "...", "mitre_attack": ["T####"]}
   ],
   "technical_remediation": [
-    {"finding_id": "exact id from the findings list", "finding": "...", "owasp": "...", "steps": ["...", "..."], "commands": ["..."]}
+    {"finding_id": "exact id from the findings list", "finding": "...", "owasp": "...", "mitre_attack": "T####", "steps": ["...", "..."], "commands": ["..."]}
   ],
   "conclusion": "..."
 }
