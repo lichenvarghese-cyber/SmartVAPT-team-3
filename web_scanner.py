@@ -261,6 +261,259 @@ class WebScanner:
                 ))
         return result
 
+    # ------------------------------------------------------------------
+    # Cookie / CORS / CSP / CSRF checks (single read-only requests)
+    # ------------------------------------------------------------------
+    def check_cookies(self) -> dict[str, Any]:
+        """Audit Set-Cookie flags (Secure, HttpOnly, SameSite)."""
+        result = {"url": self.target, "cookies": [], "findings": [],
+                  "error": None}
+        try:
+            resp = requests.get(self.target, timeout=self.timeout,
+                                allow_redirects=True,
+                                headers=self.auth_headers or None)
+        except requests.RequestException as e:
+            result["error"] = str(e)
+            return result
+
+        try:
+            raw_cookies = resp.raw.headers.getlist("Set-Cookie")
+        except Exception:
+            combined = resp.headers.get("Set-Cookie")
+            raw_cookies = [combined] if combined else []
+
+        is_https = urlparse(self.target).scheme == "https"
+        insecure, httponly_missing, samesite_missing = [], [], []
+        for header in raw_cookies[:15]:
+            header = str(header or "").strip()
+            if not header or "=" not in header:
+                continue
+            name = header.split("=", 1)[0].strip()
+            if not name:
+                continue
+            low = header.lower()
+            secure = bool(re.search(r";\s*secure\b", low))
+            httponly = bool(re.search(r";\s*httponly\b", low))
+            match = re.search(r";\s*samesite=([^;]+)", low)
+            samesite = match.group(1).strip() if match else None
+            result["cookies"].append({
+                "name": name, "secure": secure, "httponly": httponly,
+                "samesite": samesite,
+            })
+            if is_https and not secure:
+                insecure.append(name)
+            if not httponly:
+                httponly_missing.append(name)
+            if samesite in (None, "none"):
+                samesite_missing.append(f"{name} ({samesite or 'unset'})")
+
+        if insecure:
+            result["findings"].append(self._mk_finding(
+                id=self._next_id(), vector="web",
+                title=f"Cookie missing Secure flag: {', '.join(insecure[:6])}",
+                severity="medium",
+                description="Cookies without the Secure flag can be sent "
+                            "over plaintext HTTP and stolen on a downgrade.",
+                evidence="; ".join(insecure),
+                owasp="A05:2021 - Security Misconfiguration",
+                target=self.target,
+                remediation="Set the Secure attribute on all session cookies."))
+        if httponly_missing:
+            result["findings"].append(self._mk_finding(
+                id=self._next_id(), vector="web",
+                title=f"Cookie missing HttpOnly flag: "
+                      f"{', '.join(httponly_missing[:6])}",
+                severity="medium",
+                description="Cookies without HttpOnly are readable by "
+                            "JavaScript, so an XSS flaw can steal the session.",
+                evidence="; ".join(httponly_missing),
+                owasp="A05:2021 - Security Misconfiguration",
+                target=self.target,
+                remediation="Set the HttpOnly attribute on session cookies."))
+        if samesite_missing:
+            result["findings"].append(self._mk_finding(
+                id=self._next_id(), vector="web",
+                title="Cookie SameSite attribute missing or None",
+                severity="low",
+                description="Without SameSite=Lax/Strict, cookies may be sent "
+                            "on cross-site requests, weakening CSRF defences.",
+                evidence="; ".join(samesite_missing[:6]),
+                owasp="A01:2021 - Broken Access Control",
+                target=self.target,
+                remediation="Set SameSite=Lax (or Strict) on session cookies."))
+        if self.evidence and result["cookies"]:
+            self.evidence.save_json("cookies", result["cookies"])
+        return result
+
+    def check_cors(self) -> dict[str, Any]:
+        """Probe for a permissive CORS policy with a harmless Origin."""
+        probe = "https://smartvapt-probe.invalid"
+        result = {"url": self.target, "probe_origin": probe,
+                  "allow_origin": None, "allow_credentials": False,
+                  "findings": [], "error": None}
+        headers = dict(self.auth_headers or {})
+        headers["Origin"] = probe
+        try:
+            resp = requests.get(self.target, timeout=self.timeout,
+                                allow_redirects=True, headers=headers)
+        except requests.RequestException as e:
+            result["error"] = str(e)
+            return result
+
+        acao = resp.headers.get("Access-Control-Allow-Origin")
+        acac = str(resp.headers.get(
+            "Access-Control-Allow-Credentials", "")).lower() == "true"
+        result.update({"allow_origin": acao, "allow_credentials": acac,
+                       "status": resp.status_code})
+        if not acao:
+            return result
+
+        title = severity = None
+        if acao == probe and acac:
+            title, severity = "CORS reflects any origin with credentials", "high"
+            desc = ("The server reflects an arbitrary Origin and allows "
+                    "credentials, so any website can read authenticated "
+                    "responses from this origin.")
+        elif acao == probe:
+            title, severity = "CORS reflects an arbitrary origin", "medium"
+            desc = ("The server reflects any Origin in "
+                    "Access-Control-Allow-Origin, exposing responses to "
+                    "third-party sites.")
+        elif acao == "null":
+            title, severity = "CORS allows the null origin", "medium"
+            desc = ("Access-Control-Allow-Origin: null can be reached from "
+                    "sandboxed iframes and data: URLs.")
+        elif acao == "*" and acac:
+            title, severity = "CORS wildcard combined with credentials", "low"
+            desc = ("ACAO * with credentials is rejected by modern browsers, "
+                    "but signals a misconfigured policy; restrict the origin.")
+        if title:
+            result["findings"].append(self._mk_finding(
+                id=self._next_id(), vector="web", title=title,
+                severity=severity, description=desc,
+                evidence=f"Origin: {probe} -> ACAO: {acao}; "
+                         f"ACAC: {acac}",
+                owasp="A05:2021 - Security Misconfiguration",
+                target=self.target,
+                remediation="Allow only trusted origins and never combine "
+                            "a wildcard with credentials."))
+        return result
+
+    def analyze_csp(self) -> dict[str, Any]:
+        """Review an existing CSP for unsafe directives."""
+        result = {"url": self.target, "present": False, "policy": None,
+                  "issues": [], "findings": [], "error": None}
+        try:
+            resp = requests.get(self.target, timeout=self.timeout,
+                                allow_redirects=True,
+                                headers=self.auth_headers or None)
+        except requests.RequestException as e:
+            result["error"] = str(e)
+            return result
+
+        policy = (resp.headers.get("Content-Security-Policy")
+                  or resp.headers.get(
+                      "Content-Security-Policy-Report-Only"))
+        if not policy:
+            return result
+        result.update({"present": True, "policy": policy})
+
+        directives: dict[str, list[str]] = {}
+        for part in policy.split(";"):
+            tokens = part.strip().split()
+            if tokens:
+                directives[tokens[0].lower()] = [t.lower() for t in tokens[1:]]
+        script = directives.get("script-src") or directives.get("default-src") or []
+        if "'unsafe-inline'" in script:
+            result["issues"].append("script-src allows 'unsafe-inline'")
+        if "'unsafe-eval'" in script:
+            result["issues"].append("script-src allows 'unsafe-eval'")
+        if "*" in script:
+            result["issues"].append("script-src allows any host (*)")
+        if "http:" in script:
+            result["issues"].append("script-src allows plaintext http:")
+        if not script:
+            result["issues"].append("no script-src or default-src fallback")
+
+        if result["issues"]:
+            result["findings"].append(self._mk_finding(
+                id=self._next_id(), vector="web",
+                title="Weak Content-Security-Policy",
+                severity="medium",
+                description="The CSP contains directives that allow script "
+                            "injection: " + "; ".join(result["issues"]),
+                evidence=policy[:500],
+                owasp="A05:2021 - Security Misconfiguration",
+                target=self.target,
+                remediation="Remove unsafe-inline/unsafe-eval/* and use "
+                            "nonces or hashes for scripts."))
+        return result
+
+    def check_csrf(self) -> dict[str, Any]:
+        """Heuristically flag POST forms without an anti-CSRF token."""
+        result = {"url": self.target, "forms": [], "post_forms": 0,
+                  "missing_token": 0, "findings": [], "error": None,
+                  "note": "Heuristic review; confirm manually."}
+        try:
+            resp = requests.get(self.target, timeout=self.timeout,
+                                allow_redirects=True,
+                                headers=self.auth_headers or None)
+        except requests.RequestException as e:
+            result["error"] = str(e)
+            return result
+
+        content_type = str(resp.headers.get("Content-Type", "")).lower()
+        body = resp.text[:500000]
+        if "html" not in content_type and "<form" not in body.lower():
+            return result
+
+        token_re = re.compile(
+            r"csrf|xsrf|authenticity|requestverificationtoken|_token|nonce",
+            re.IGNORECASE)
+        seen_actions = set()
+        for match in re.finditer(r"<form\b([^>]*)>(.*?)</form>", body,
+                                 re.IGNORECASE | re.DOTALL):
+            attrs_raw, inner = match.group(1), match.group(2)
+            attrs = {k.lower(): v for k, v in re.findall(
+                r"([\w:-]+)\s*=\s*[\"']([^\"']*)[\"']", attrs_raw)}
+            if attrs.get("method", "get").lower() != "post":
+                continue
+            action = attrs.get("action") or self.target
+            if action in seen_actions:
+                continue
+            seen_actions.add(action)
+            hidden = re.findall(r"<input\b([^>]*)>", inner,
+                                re.IGNORECASE | re.DOTALL)
+            names = []
+            for raw in hidden:
+                input_attrs = {k.lower(): v for k, v in re.findall(
+                    r"([\w:-]+)\s*=\s*[\"']([^\"']*)[\"']", raw)}
+                names.append(input_attrs.get("name", ""))
+            has_token = any(token_re.search(name) for name in names if name)
+            result["post_forms"] += 1
+            result["forms"].append({"action": action, "has_token": has_token,
+                                    "inputs": [n for n in names if n][:12]})
+            if has_token:
+                continue
+            result["missing_token"] += 1
+            if len(result["findings"]) >= 5:
+                continue
+            result["findings"].append(self._mk_finding(
+                id=self._next_id(), vector="web",
+                title=f"POST form without anti-CSRF token: {action[:80]}",
+                severity="medium",
+                description="A POST form exposes no hidden CSRF/XSRF token. "
+                            "If session cookies lack SameSite protection, "
+                            "cross-site request forgery may be possible.",
+                evidence=f"form action={action}; hidden inputs="
+                         f"{[n for n in names if n][:8]}",
+                owasp="A01:2021 - Broken Access Control",
+                confidence="heuristic (manual review required)",
+                target=self.target,
+                remediation="Add a per-session anti-CSRF token, validate it "
+                            "server-side, and set SameSite=Lax/Strict."))
+        return result
+
     def detect_technologies(self) -> dict[str, Any]:
         tech = []
         try:

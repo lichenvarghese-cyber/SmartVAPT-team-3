@@ -289,6 +289,64 @@ def _render_compliance_posture(pdf, compliance: dict, ai_result: dict):
     _safe_multi(pdf, compliance.get("disclaimer") or "", line_h=4, size=8)
 
 
+def _render_threat_intel(pdf, findings: list, intel: dict):
+    """Section N: EPSS / CISA KEV prioritization."""
+    _appendix_heading(pdf, "N. Exploit Likelihood (EPSS + CISA KEV)")
+    _kv_line(pdf, "Source", "FIRST EPSS + CISA Known Exploited "
+                            "Vulnerabilities")
+    _kv_line(pdf, "CVEs checked", intel.get("cves_checked", 0))
+    _kv_line(pdf, "EPSS scored", intel.get("epss_scored", 0))
+    _kv_line(pdf, "In CISA KEV", intel.get("kev_matches", 0))
+    for error in (intel.get("errors") or []):
+        _safe_multi(pdf, f"Note: {error}", line_h=4, size=9)
+    cve_findings = sorted(
+        [f for f in (findings or []) if isinstance(f, dict) and f.get("cve")],
+        key=lambda f: (-float(f.get("epss") or 0), str(f.get("id") or "")))
+    if cve_findings:
+        _safe_multi(pdf, "CVE-backed findings (sorted by EPSS):", size=10,
+                    style="B")
+        for f in cve_findings[:25]:
+            epss = (f"{float(f['epss']) * 100:.1f}%"
+                    if f.get("epss") is not None else "-")
+            kev = "KEV" if f.get("kev") else ""
+            _safe_multi(
+                pdf,
+                f"  - {f.get('id', '?')}  {f.get('cve')}  "
+                f"[{str(f.get('severity', '')).upper()}]  EPSS {epss}  {kev}  "
+                f"— {str(f.get('title', ''))[:70]}",
+                line_h=4, size=9)
+    _safe_multi(pdf, "EPSS estimates 30-day exploitation likelihood; CISA KEV "
+                 "lists vulnerabilities exploited in the wild. Deterministic "
+                 "sources - severity is never changed by this enrichment.",
+                 line_h=4, size=8)
+
+
+def _render_attack_path(pdf, graph: dict):
+    """Section O: deterministic attack-path summary."""
+    _appendix_heading(pdf, "O. Attack Path (deterministic projection)")
+    summary = graph.get("summary") or {}
+    _kv_line(pdf, "Nodes", summary.get("nodes", 0))
+    _kv_line(pdf, "Edges", summary.get("edges", 0))
+    _kv_line(pdf, "Findings mapped", summary.get("findings_mapped", 0))
+    _kv_line(pdf, "Services", summary.get("services", 0))
+    _kv_line(pdf, "Impacts", summary.get("impacts", 0))
+    _kv_line(pdf, "KEV-backed findings", summary.get("kev_findings", 0))
+    chokes = graph.get("chokepoints") or []
+    if chokes:
+        _safe_multi(pdf, "Chokepoints (assets/impacts that concentrate the "
+                     "most findings):", size=10, style="B")
+        for c in chokes[:8]:
+            _safe_multi(pdf, f"  - {c.get('label')} ({c.get('kind')}) - "
+                             f"{c.get('findings', 0)} finding(s)",
+                        line_h=4, size=9)
+    paths = graph.get("paths") or []
+    if paths:
+        _safe_multi(pdf, "Observed paths:", size=10, style="B")
+        for path in paths[:12]:
+            _safe_multi(pdf, f"  - {path}", line_h=4, size=9)
+    _safe_multi(pdf, graph.get("disclaimer") or "", line_h=4, size=8)
+
+
 def generate_report(scan_data: dict, ai_result: dict,
                     output_path: str = "SmartVAPT_Report.pdf",
                     include_exec_summary: bool = True,
@@ -487,6 +545,19 @@ def generate_report(scan_data: dict, ai_result: dict,
     if isinstance(compliance, dict) and compliance:
         pdf.add_page()
         _render_compliance_posture(pdf, compliance, ai_result)
+
+    # ---------- N. Exploit Likelihood ----------
+    intel = scan_data.get("threat_intel") or {}
+    findings = scan_data.get("findings") or []
+    if isinstance(intel, dict) and intel.get("cves_checked"):
+        pdf.add_page()
+        _render_threat_intel(pdf, findings, intel)
+
+    # ---------- O. Attack Path ----------
+    ap = scan_data.get("attack_path") or {}
+    if isinstance(ap, dict) and ap and not ap.get("error"):
+        pdf.add_page()
+        _render_attack_path(pdf, ap)
 
     pdf.output(output_path)
     return output_path

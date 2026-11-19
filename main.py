@@ -7,6 +7,7 @@ import streamlit as st
 import exporters
 from ai_engine import AIEngine, check_engine
 from api_scanner import APIScanner
+from attack_path import build_attack_path
 from command_tracker import tracker
 from compliance_mapper import compliance_rows, summarize as summarize_compliance
 from config import SLM_BASE_URL, SLM_MODEL, SLM_PROVIDER
@@ -21,6 +22,7 @@ from nuclei_scanner import NucleiScanner
 from report_gen import generate_report
 from scoring import enrich_findings
 from subdomain_scanner import SubdomainScanner
+from threat_intel import enrich_findings as enrich_threat_intel
 from verification import apply_verification
 from verify_fix import verify_fix
 from web_scanner import DNSScanner, WebScanner, parse_auth_headers
@@ -103,6 +105,75 @@ def _verify_fix_panel(findings_list, scan_target, guardrails, auth_headers,
     if outcome.get("observed"):
         with st.expander("Observed data"):
             st.json(outcome["observed"])
+
+
+def _render_threat_intel_section(results):
+    """EPSS / CISA KEV prioritization for CVE-backed findings."""
+    intel = results.get("threat_intel") or {}
+    findings = [f for f in (results.get("findings") or [])
+                if isinstance(f, dict) and f.get("cve")]
+    if not intel or not intel.get("cves_checked"):
+        st.caption("No CVE-backed findings in this scan — EPSS/KEV "
+                   "prioritization was not needed.")
+        return
+    c1, c2, c3 = st.columns(3)
+    c1.metric("CVEs checked", intel.get("cves_checked", 0))
+    c2.metric("EPSS scored", intel.get("epss_scored", 0))
+    c3.metric("In CISA KEV", intel.get("kev_matches", 0))
+    for error in intel.get("errors") or []:
+        st.warning(f"Threat intel: {error} (severity left unchanged)")
+    if findings:
+        rows = []
+        for f in sorted(findings, key=lambda x: (
+                -float(x.get("epss") or 0), str(x.get("id") or ""))):
+            rows.append({
+                "ID": f.get("id", ""),
+                "CVE": f.get("cve", ""),
+                "Severity": str(f.get("severity", "")).upper(),
+                "EPSS": (f"{float(f['epss']) * 100:.1f}%"
+                         if f.get("epss") is not None else "-"),
+                "Percentile": (f"{float(f['epss_percentile']) * 100:.1f}%"
+                               if f.get("epss_percentile") is not None else "-"),
+                "KEV": "YES" if f.get("kev") else "",
+                "Priority": str(f.get("exploit_priority") or "").replace(
+                    "_", " "),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                     hide_index=True)
+    st.caption("EPSS estimates 30-day exploitation likelihood; CISA KEV "
+               "lists vulnerabilities exploited in the wild. Deterministic "
+               "sources — severity is never changed by this enrichment.")
+
+
+def _render_attack_path_section(results):
+    """Render the deterministic attack-path graph and its chokepoints."""
+    graph = results.get("attack_path") or {}
+    if not graph or graph.get("error"):
+        st.info(graph.get("error") or "No attack-path graph was generated.")
+        return
+    summary = graph.get("summary") or {}
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Nodes", summary.get("nodes", 0))
+    a2.metric("Edges", summary.get("edges", 0))
+    a3.metric("Findings mapped", summary.get("findings_mapped", 0))
+    a4.metric("KEV-backed", summary.get("kev_findings", 0))
+    if graph.get("dot"):
+        st.graphviz_chart(graph["dot"])
+    st.caption(graph.get("disclaimer") or "")
+    chokes = graph.get("chokepoints") or []
+    if chokes:
+        st.markdown("#### Chokepoints")
+        st.caption("Assets or impacts that concentrate the most findings — "
+                   "fixing these removes multiple paths at once.")
+        st.dataframe(pd.DataFrame([{
+            "Node": c.get("label"), "Type": c.get("kind"),
+            "Findings": c.get("findings"),
+        } for c in chokes]), use_container_width=True, hide_index=True)
+    paths = graph.get("paths") or []
+    if paths:
+        with st.expander("Observed attack paths"):
+            for path in paths:
+                st.markdown(f"- `{path}`")
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -613,6 +684,10 @@ if run:
                           "skipped": "provider_guardrail",
                           "error": "Directory brute-forcing disabled by provider guardrails."}),
                 "tls": ws.analyze_tls(),
+                "cookies": ws.check_cookies(),
+                "cors": ws.check_cors(),
+                "csp": ws.analyze_csp(),
+                "csrf": ws.check_csrf(),
                 "robots_sitemap": ws.fetch_robots_sitemap(),
                 "sensitive_paths": (ws.probe_sensitive_paths(
                     request_delay=guardrails.get("request_delay", 0.0))
@@ -626,8 +701,9 @@ if run:
             results["web_audited_url"] = ws.target
             # Always sync port/service metadata with nmap -sV observations
             # so every web finding carries the accurate port/service.
-            for key in ("headers", "directories", "tls",
-                        "robots_sitemap", "sensitive_paths", "redirects"):
+            for key in ("headers", "directories", "tls", "cookies", "cors",
+                        "csp", "csrf", "robots_sitemap", "sensitive_paths",
+                        "redirects"):
                 _ingest_findings(findings,
                                  web_result.get(key, {}).get("findings", []))
         except (ScanStopped, RuntimeError) as e:
@@ -778,6 +854,13 @@ if run:
         if fv:
             filt = [f for f in filt if str(f.get("vector") or "").lower() in fv]
         enriched = filt
+    # Deterministic exploit-likelihood enrichment (EPSS + CISA KEV). Cached
+    # locally, failure-tolerant, and it never changes severity.
+    try:
+        results["threat_intel"] = enrich_threat_intel(enriched)
+    except Exception as e:
+        results["threat_intel"] = {"errors": [str(e)], "cves_checked": 0}
+
     # Deterministic compliance posture is available even when the SLM is
     # offline and is passed to the model as grounding context.
     results["compliance"] = summarize_compliance(enriched)
@@ -809,6 +892,11 @@ if run:
     # (Filters were applied before AI/report generation above; this block is
     # intentionally left out so the summary and the report cannot diverge.)
     results["findings"] = enriched
+    # Deterministic attack-path projection (no network, no AI).
+    try:
+        results["attack_path"] = build_attack_path(results)
+    except Exception as e:
+        results["attack_path"] = {"error": str(e)}
     # Persist the latest findings for the sidebar remediation tracker. The
     # sidebar renders on the next rerun and reads this from session state.
     st.session_state.last_findings = enriched
@@ -930,9 +1018,9 @@ if run:
     # ----------------------------------------------------------------
     # TABS
     # ----------------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
         ["Network", "Web", "DNS", "Recon / API", "All Findings", "Location",
-         "Provider & Compliance"])
+         "Provider & Compliance", "Attack Path"])
 
     # ================== NETWORK TAB ==================
     with tab1:
@@ -1009,6 +1097,41 @@ if run:
             if hdr_rows:
                 st.dataframe(pd.DataFrame(hdr_rows),
                              use_container_width=True, hide_index=True)
+
+            cookies = web.get("cookies") or {}
+            cors = web.get("cors") or {}
+            csp = web.get("csp") or {}
+            csrf = web.get("csrf") or {}
+            st.markdown("#### Cookie / CORS / CSP / CSRF posture")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Cookies", len(cookies.get("cookies") or []))
+            k2.metric("CORS origin", cors.get("allow_origin") or "none")
+            k3.metric("CSP issues", len(csp.get("issues") or []))
+            k4.metric("CSRF gaps", csrf.get("missing_token", 0))
+            cookie_rows = cookies.get("cookies") or []
+            if cookie_rows:
+                with st.expander(f"Cookie flags ({len(cookie_rows)})"):
+                    st.dataframe(pd.DataFrame([{
+                        "Name": c.get("name"),
+                        "Secure": "yes" if c.get("secure") else "NO",
+                        "HttpOnly": "yes" if c.get("httponly") else "NO",
+                        "SameSite": c.get("samesite") or "unset",
+                    } for c in cookie_rows]), use_container_width=True,
+                        hide_index=True)
+            if csp.get("present"):
+                with st.expander("Content-Security-Policy"):
+                    st.code(csp.get("policy") or "", language="text")
+                    for issue in csp.get("issues") or []:
+                        st.markdown(f"- ⚠️ {issue}")
+            csrf_rows = csrf.get("forms") or []
+            if csrf_rows:
+                with st.expander(f"Forms reviewed ({len(csrf_rows)})"):
+                    st.dataframe(pd.DataFrame([{
+                        "Action": row.get("action"),
+                        "Anti-CSRF token": "yes" if row.get("has_token") else "NO",
+                    } for row in csrf_rows]), use_container_width=True,
+                        hide_index=True)
+                    st.caption(csrf.get("note") or "")
 
             if techs:
                 st.markdown("#### Detected Technologies")
@@ -1130,6 +1253,13 @@ if run:
     with tab5:
         all_findings = enriched
         if all_findings:
+            kev_count = sum(1 for f in all_findings if f.get("kev"))
+            scored = sum(1 for f in all_findings
+                         if f.get("epss") is not None)
+            if kev_count or scored:
+                st.caption(f"Exploit intelligence: {kev_count} finding(s) in "
+                           f"CISA KEV · {scored} with an EPSS score. "
+                           "Use the Provider & Compliance tab for details.")
             rows = []
             for f in all_findings:
                 comp = f.get("compliance") or {}
@@ -1139,6 +1269,11 @@ if run:
                     "Vector": f.get("vector", ""),
                     "Title": f.get("title", ""),
                     "Target": f.get("target", ""),
+                    "EPSS": (f"{float(f['epss']) * 100:.1f}%"
+                             if f.get("epss") is not None else ""),
+                    "KEV": "YES" if f.get("kev") else "",
+                    "Priority": str(f.get("exploit_priority") or "").replace(
+                        "_", " "),
                     "OWASP": ", ".join(comp.get("owasp") or []),
                     "PCI-DSS": ", ".join(comp.get("pci_dss") or []),
                     "NIST CSF": ", ".join(comp.get("nist_csf") or []),
@@ -1330,6 +1465,18 @@ if run:
                         st.caption("No findings mapped to this framework.")
             st.caption(comp.get("disclaimer") or "")
 
+        st.markdown("---")
+        st.markdown("#### Exploit likelihood (EPSS / CISA KEV)")
+        _render_threat_intel_section(results)
+
+    # ================== ATTACK PATH TAB ==================
+    with tab8:
+        st.markdown("#### Attack-path graph")
+        st.caption("Deterministic projection of the observed assets, services, "
+                   "findings and business impacts. Hover/zoom the graph; use "
+                   "chokepoints to prioritize fixes that break multiple paths.")
+        _render_attack_path_section(results)
+
     # ----------------------------------------------------------------
     # MULTI-FORMAT EXPORTS
     # ----------------------------------------------------------------
@@ -1422,6 +1569,10 @@ else:
                           last.get("guardrails") or {},
                           st.session_state.get("last_auth_headers") or {},
                           last.get("scan_id", ""))
+        st.markdown("#### 🕸 Attack Path")
+        _render_attack_path_section(last)
+        with st.expander("Exploit likelihood (EPSS / CISA KEV)"):
+            _render_threat_intel_section(last)
         last_pdf = st.session_state.get("last_pdf_path")
         if last_pdf and os.path.exists(last_pdf):
             with open(last_pdf, "rb") as fh:

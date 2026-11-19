@@ -7,6 +7,7 @@ import sys
 
 from ai_engine import AIEngine
 from api_scanner import APIScanner
+from attack_path import build_attack_path
 from compliance_mapper import summarize as summarize_compliance
 from evidence import EvidenceStore, new_scan_id
 from findings import Finding, FindingSet
@@ -17,6 +18,7 @@ from network_scanner import NetworkScanner
 from nuclei_scanner import NucleiScanner
 from report_gen import generate_report
 from scoring import enrich_findings
+from threat_intel import enrich_findings as enrich_threat_intel
 from subdomain_scanner import SubdomainScanner
 from verification import apply_verification
 from web_scanner import DNSScanner, WebScanner
@@ -55,6 +57,7 @@ def main():
     scan_sub = "subdomains" in opts
     scan_api = "api" in opts
     force_active = "force-active" in opts
+    use_threat_intel = "no-threat-intel" not in opts
 
     def log(line):
         print(line.rstrip())
@@ -154,6 +157,10 @@ def main():
                           "skipped": "provider_guardrail",
                           "error": "Directory brute-forcing disabled by provider guardrails."}),
                 "tls": ws.analyze_tls(),
+                "cookies": ws.check_cookies(),
+                "cors": ws.check_cors(),
+                "csp": ws.analyze_csp(),
+                "csrf": ws.check_csrf(),
                 "robots_sitemap": ws.fetch_robots_sitemap(),
                 "sensitive_paths": (ws.probe_sensitive_paths(
                     request_delay=guardrails.get("request_delay", 0.0))
@@ -164,8 +171,9 @@ def main():
                 "redirects": ws.analyze_redirects(),
             }
             results["web"] = web_result
-            for key in ("headers", "directories", "tls", "robots_sitemap",
-                        "sensitive_paths", "redirects"):
+            for key in ("headers", "directories", "tls", "cookies", "cors",
+                        "csp", "csrf", "robots_sitemap", "sensitive_paths",
+                        "redirects"):
                 add_all(findings, web_result.get(key, {}).get("findings"))
         except Exception as e:
             results["web"] = {"error": str(e)}
@@ -282,8 +290,17 @@ def main():
 
     print("[*] Scoring / enrichment...")
     enriched = enrich_findings(findings.to_dict_list())
+    if use_threat_intel:
+        print("[*] Threat intel (EPSS + CISA KEV)...")
+        results["threat_intel"] = enrich_threat_intel(enriched)
+        print(f"    -> cves: {results['threat_intel'].get('cves_checked', 0)} "
+              f"kev: {results['threat_intel'].get('kev_matches', 0)} "
+              f"epss: {results['threat_intel'].get('epss_scored', 0)}")
+    else:
+        results["threat_intel"] = {}
     results["findings"] = enriched
     results["compliance"] = summarize_compliance(enriched)
+    results["attack_path"] = build_attack_path(results)
     print(f"    -> compliance exposure: "
           f"{results['compliance'].get('exposure_index', 0)}/100 "
           f"({results['compliance'].get('risk_band', 'None')})")

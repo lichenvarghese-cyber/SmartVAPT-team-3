@@ -32,6 +32,9 @@ Provider guardrails reduce load on shared infrastructure, but they do **not** gr
 | **Provider Guardrails** | `infrastructure_mapper.py` | CDN/WAF, cloud, PaaS, shared hosting, ISP and private-address classification; passive/throttled modes; RDAP abuse contacts, `security.txt` and suggested ASN pivots |
 | **Compliance Mapping** | `compliance_mapper.py` | Deterministic OWASP Top 10 (2021), NIST CSF and PCI-DSS mapping per finding, exposure index and C-level summary |
 | **Verify Fix** | `verify_fix.py` | Per-finding, read-only re-test after remediation: fixed / still present / inconclusive / skipped |
+| **Exploit likelihood** | `threat_intel.py` | EPSS + CISA KEV enrichment (local 24h cache); deterministic priority, never changes severity |
+| **Cookie / CORS / CSP / CSRF** | `web_scanner.py` | Cookie flags, CORS reflection/wildcard, CSP directive review, CSRF token heuristics |
+| **Attack path graph** | `attack_path.py` | Deterministic asset → service → finding → impact graph with chokepoints |
 | **Findings Engine** | `findings.py`, `scoring.py` | Normalization, deduplication, CVSS/severity, remediation playbooks, MITRE ATT&CK guidance |
 | **Evidence Store** | `evidence.py` | Raw tool output per scan (`evidence/<scan_id>/`) so findings are reproducible |
 | **AI Reporting** | `ai_engine.py` | Executive summary, per-finding impact, prioritized remediation and compliance narrative from a local SLM |
@@ -256,7 +259,7 @@ smartvapt
 4. Choose the port preset (default: the 1000 most-used ports).
 5. Optionally enable **Nuclei**, **Subdomain enum**, **API security checks**, baseline mode or authenticated headers.
 6. Click **Run SmartVAPT Scan**.
-7. Review the seven tabs: **Network, Web, DNS, Recon / API, All Findings, Location, Provider & Compliance**.
+7. Review the eight tabs: **Network, Web, DNS, Recon / API, All Findings, Location, Provider & Compliance, Attack Path**.
 8. Use **All Findings → Verify Fix** after remediation, and download the PDF/JSON/HTML/SARIF exports.
 
 ### Scan time
@@ -302,7 +305,7 @@ source venv/bin/activate
 python -m pytest -q
 ```
 
-Current suite: **90 tests** covering finding normalization, scoring, verification, provider guardrails, compliance mapping, PDF sections L/M and Verify Fix.
+Current suite: **111 tests** covering finding normalization, scoring, verification, provider guardrails, compliance mapping, PDF sections L/M/N/O, Verify Fix, threat intelligence, web security checks and attack paths.
 
 ---
 
@@ -350,7 +353,7 @@ SmartVAPT-team-3/
 - **Closed-loop remediation** — Verify Fix re-tests individual findings and reports fixed / still present / inconclusive.
 - **Privacy-preserving AI** — local SLM via Ollama; no API keys and no scan-data egress. Deterministic fallback keeps reports working offline.
 - **AI output verification** — every structured claim is matched to a real finding; ungrounded claims are dropped and a SHA-256 digest is embedded.
-- **Professional PDF reporting** — severity-ranked, branded reports including MITRE ATT&CK (Section K), infrastructure/guardrails (L) and compliance (M).
+- **Professional PDF reporting** — severity-ranked, branded reports including MITRE ATT&CK (Section K), infrastructure/guardrails (L), compliance (M), exploit likelihood (N) and attack path (O).
 - **Graceful degradation** — missing Nuclei, gobuster, Ollama or API access never crashes a scan; affected vectors are reported clearly.
 - **Beginner-friendly, pro-useful** — one-click Streamlit workflow with a modular Python backend that can be scripted or extended.
 

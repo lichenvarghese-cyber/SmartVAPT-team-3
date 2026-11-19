@@ -14,4 +14,5 @@ SmartVAPT_*.json
 results_*.json
 baseline.json
 eta_history.json
+threat_intel_cache.json
 evidence/*/
